@@ -1,0 +1,4 @@
+{
+  "theme": "default",
+  "flowchart": { "htmlLabels": true, "curve": "basis", "padding": 10, "wrappingWidth": 360, "nodeSpacing": 40, "rankSpacing": 40 }
+}

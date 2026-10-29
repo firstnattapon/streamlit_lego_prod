@@ -1,0 +1,18 @@
+flowchart TD
+    A["1. จ่าย K ก่อน<br/>K = 12.4% * Fix_c * Hedge<br/>12.4% = put OTM 10% อายุ 1 ปี σ=50%"] --> B["2. E โตตาม ½σ² * Fix_c ต่อปี<br/>ต้องแกว่ง ≥ √(2k) ≈ 50% ต่อปี<br/>เมื่อ k = K / Fix_c = 12.4%"]
+
+    B --> C{"3. S = E_cyc − K<br/>บวกไหม ?"}
+    C -->|"ใช่"| D["4-5. Shield → Scale Up → Rollover<br/>ปิดรอบ"]
+    D --> M["วัด ΣE / ΣK ≥ 1.0x<br/>ตอนปิดรอบได้ ≈ 1.00x เสมอ<br/>ผ่านโดยนิยาม ไม่ใช่ตัวชี้ว่าเสีย"]
+
+    C -->|"ยัง ไม่จ่าย K ซ้ำ"| Z{"ออปชันหมดอายุก่อนคุ้ม ?<br/>เวลาจนคุ้ม = 2k / σ² ปี"}
+    Z -->|"ยังไม่"| B
+    Z -->|"หมดแล้ว"| L["K สูญ ต้องจ่ายใหม่<br/>แผนภาพย่อไม่มีกล่องนี้"]
+
+    classDef calc fill:#e8f1ff,stroke:#3b6fd4,color:#111;
+    classDef act fill:#fff4d6,stroke:#d49a1a,color:#111;
+    classDef gap fill:#ffe9e9,stroke:#d43b3b,color:#111;
+
+    class A,B calc;
+    class D act;
+    class M,Z,L gap;

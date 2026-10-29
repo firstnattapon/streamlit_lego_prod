@@ -1,0 +1,20 @@
+flowchart TD
+    A["1. คำนวณ Gap และ R<br/>Gap = Q × P − Fix_c<br/>R = Fix_c × ln(P / P₀)"] --> B{"2. ABS(Gap) ≤ DIFF ?"}
+
+    B -->|"ใช่"| PASS["PASS · จบรอบ<br/>A, E, P_acted คงเดิม"]
+    B -->|"ไม่"| C["3. สั่งซื้อ/ขาย แล้วเก็บ fill<br/>Qty = ABS(Gap) / P<br/>Gap > 0 ขาย · Gap < 0 ซื้อ"]
+
+    C --> D{"4. ถึงเป้า ?<br/>ABS(Qty_actual × P − Fix_c) ≤ DIFF"}
+    D -->|"ยัง · วนกลับ"| C
+    D -->|"ถึงแล้ว"| E["5. VWAP<br/>Σ(Qty × Price) / ΣQty<br/>ทุก fill ในรอบ"]
+
+    E --> F["6. ACT ครั้งเดียว<br/>ΔA = Fix_c × (VWAP / P_acted − 1)<br/>A_new = A_old + ΔA<br/>E_new = A_new − R<br/>P_acted = VWAP"]
+    F --> DONE["จบรอบ"]
+
+    classDef calc fill:#e8f1ff,stroke:#3b6fd4,color:#111;
+    classDef act fill:#fff4d6,stroke:#d49a1a,color:#111;
+    classDef end_ fill:#eeeeee,stroke:#888,color:#111;
+
+    class A,C,E calc;
+    class F act;
+    class PASS,DONE end_;

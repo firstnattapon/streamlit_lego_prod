@@ -1,0 +1,22 @@
+flowchart TD
+    M["1. Main rebalancing<br/>เครื่องกล ผลิต E จากความแกว่ง"] --> O{"3. Option Scale<br/>กลยุทธ์ S = E_cyc − K<br/>บวกไหม ?"}
+
+    O -->|"ใช่"| R["2. Rollover<br/>กฎอนุรักษ์ เปลี่ยน Fix_c<br/>A, E, R ไม่ขยับ"]
+    O -->|"ยัง"| M
+    R -->|"Fix_c_new"| M
+
+    GM["มองข้าม<br/>E บวกเสมอ ไม่ได้แปลว่าชนะถือเฉยๆ<br/>ต้องเดิมพันว่าราคาวนกลับ"]
+    GO["มองข้าม<br/>แกว่งจริง ≥ √(2k) จึงคุ้ม (k = K / Fix_c)<br/>นาฬิกา 2k / σ² ปี และอายุออปชัน"]
+    GR["มองข้าม<br/>beta ซ่อนราคา P_avg ที่ R = 0<br/>มีเกียร์ถอยแต่ไม่มีกฎใช้"]
+
+    M -.- GM
+    O -.- GO
+    R -.- GR
+
+    classDef calc fill:#e8f1ff,stroke:#3b6fd4,color:#111;
+    classDef act fill:#fff4d6,stroke:#d49a1a,color:#111;
+    classDef gap fill:#ffe9e9,stroke:#d43b3b,color:#111;
+
+    class M calc;
+    class R act;
+    class GM,GO,GR gap;

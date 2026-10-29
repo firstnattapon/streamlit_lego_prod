@@ -1,0 +1,20 @@
+flowchart TD
+    A["1. จ่าย K ก่อน (Deep ITM LEAPS)<br/>K = 12.4% * Fix_c * Hedge<br/>จำ E ตอนจ่าย"] --> B["2. เก็บ E ตาม Main rebalancing<br/>หุ้น 20% + LEAPS 80%<br/>E_cyc = E_new − E ตอนจ่าย"]
+
+    B --> C{"3. S = E_cyc − K<br/>บวกไหม ?"}
+
+    C -->|"ใช่"| D["4. Shield (Long Put) ก่อนขยายทุน<br/>Zero-Cost ≠ ไม่เสี่ยง"]
+    C -->|"ไม่"| T["3.1 เทรนด์ R เก็บเข้ากระเป๋า<br/>ดึง capital gain เข้า Pool CF<br/>E อยู่ต่อ ไม่จ่าย K ซ้ำ"]
+    T -->|"กลับ 2"| B
+
+    D --> F["5.1 Scale Up: Fix_c_new = Fix_c + S<br/>Liquidity ถ้าพอจ่าย K รอบหน้า<br/>ไม่พอ ซื้อ Deep ITM"]
+    F --> E["5.2 Rollover<br/>beta += (Fix_c − Fix_c_new) * ln(P_acted / P₀)<br/>Fix_c = Fix_c_new"]
+    E --> L["วัดผล ΣE / ΣK ≥ 1.0x<br/>แล้วกลับไป 1 ด้วย Fix_c_new"]
+
+    classDef calc fill:#e8f1ff,stroke:#3b6fd4,color:#111;
+    classDef act fill:#fff4d6,stroke:#d49a1a,color:#111;
+    classDef end_ fill:#eeeeee,stroke:#888,color:#111;
+
+    class A,B,D,T calc;
+    class F,E act;
+    class L end_;

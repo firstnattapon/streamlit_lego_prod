@@ -1,0 +1,351 @@
+<title>Rebalancing Playground — ลากแล้วเข้าใจ</title>
+<style>
+  :root {
+    --paper: #FBFBFC; --panel: #FFFFFF; --sunk: #F3F4F7; --grid: #E9EBF0;
+    --ink: #14161C; --muted: #5A5F6E; --faint: #949AA8; --line: #E4E6EC;
+    --azure: #2D7FF9; --azure-soft: #E6F0FE;
+    --coral: #E86A3A; --coral-soft: #FBEBE2;
+    --slate: #A6ADBB; --good: #279A6C; --good-soft: #E3F3EC;
+    --shadow: 0 1px 2px rgba(20,22,32,.05), 0 10px 30px rgba(20,22,32,.07);
+    --sans: system-ui, -apple-system, "Segoe UI", "Noto Sans Thai", "Sarabun", sans-serif;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --paper: #0E1014; --panel: #171A21; --sunk: #12141A; --grid: #23262F;
+      --ink: #EDEFF4; --muted: #A2A8B6; --faint: #6B7080; --line: #262A33;
+      --azure: #5B9BFF; --azure-soft: #16233D; --coral: #F0805A; --coral-soft: #2E1E16;
+      --slate: #565C6A; --good: #48B98A; --good-soft: #14271E;
+      --shadow: 0 1px 2px rgba(0,0,0,.35), 0 12px 36px rgba(0,0,0,.45); }
+  }
+  :root[data-theme="dark"] { --paper: #0E1014; --panel: #171A21; --sunk: #12141A; --grid: #23262F;
+    --ink: #EDEFF4; --muted: #A2A8B6; --faint: #6B7080; --line: #262A33;
+    --azure: #5B9BFF; --azure-soft: #16233D; --coral: #F0805A; --coral-soft: #2E1E16;
+    --slate: #565C6A; --good: #48B98A; --good-soft: #14271E;
+    --shadow: 0 1px 2px rgba(0,0,0,.35), 0 12px 36px rgba(0,0,0,.45); }
+  :root[data-theme="light"] { --paper: #FBFBFC; --panel: #FFFFFF; --sunk: #F3F4F7; --grid: #E9EBF0;
+    --ink: #14161C; --muted: #5A5F6E; --faint: #949AA8; --line: #E4E6EC;
+    --azure: #2D7FF9; --azure-soft: #E6F0FE; --coral: #E86A3A; --coral-soft: #FBEBE2;
+    --slate: #A6ADBB; --good: #279A6C; --good-soft: #E3F3EC;
+    --shadow: 0 1px 2px rgba(20,22,32,.05), 0 10px 30px rgba(20,22,32,.07); }
+
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--paper); color: var(--ink); font-family: var(--sans);
+    line-height: 1.55; -webkit-font-smoothing: antialiased; }
+  .wrap { max-width: 780px; margin: 0 auto; padding: 40px 20px 64px; }
+
+  .eyebrow { font-family: var(--mono); font-size: 12px; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--azure); font-weight: 700; }
+  h1 { font-size: clamp(25px, 5.4vw, 36px); line-height: 1.12; letter-spacing: -.02em; margin: 10px 0 8px;
+    font-weight: 800; text-wrap: balance; }
+  .lede { font-size: clamp(15px, 2.3vw, 17px); color: var(--muted); margin: 0; max-width: 56ch; }
+  .lede b { color: var(--ink); }
+
+  .app { background: var(--panel); border: 1px solid var(--line); border-radius: 18px;
+    box-shadow: var(--shadow); overflow: hidden; margin: 24px 0; }
+
+  .hint { display: flex; gap: 10px; align-items: flex-start; padding: 13px 18px; background: var(--coral-soft);
+    border-bottom: 1px solid var(--line); font-size: 13.5px; color: var(--ink); }
+  .hint b { color: var(--coral); }
+  .hint .ic { flex: none; }
+
+  .current { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 18px;
+    border-bottom: 1px solid var(--line); background: var(--sunk); }
+  .clab { font-family: var(--mono); font-size: 11px; letter-spacing: .05em; text-transform: uppercase;
+    color: var(--faint); font-weight: 700; }
+  .cchip { display: inline-flex; align-items: baseline; gap: 6px; background: var(--panel); border: 1px solid var(--line);
+    border-radius: 999px; padding: 4px 11px; }
+  .cchip .ck { font-family: var(--mono); font-size: 11.5px; color: var(--faint); font-weight: 700; }
+  .cchip .cv { font-family: var(--mono); font-size: 14px; font-weight: 700; color: var(--ink); font-variant-numeric: tabular-nums; }
+
+  .chart-box { padding: 8px 8px 0; }
+  .chart-wrap { width: 100%; overflow-x: auto; }
+  svg { display: block; width: 100%; height: auto; }
+  .glabels { display: flex; justify-content: space-between; padding: 4px 14px 10px; font-size: 12px; color: var(--faint);
+    font-family: var(--mono); }
+
+  .controls { padding: 6px 18px 18px; display: grid; gap: 16px; }
+  .slider { display: grid; gap: 7px; }
+  .slider .top { display: flex; justify-content: space-between; align-items: baseline; }
+  .slider .name { font-size: 14px; font-weight: 600; display: inline-flex; align-items: center; gap: 8px; }
+  .swatch { width: 14px; height: 4px; border-radius: 2px; display: inline-block; }
+  .slider .val { font-family: var(--mono); font-size: 16px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .slider .name small { color: var(--faint); font-weight: 400; font-size: 12px; }
+
+  input[type=range] { -webkit-appearance: none; appearance: none; width: 100%; height: 6px; border-radius: 999px;
+    background: var(--sunk); outline: none; cursor: pointer; }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 22px; height: 22px;
+    border-radius: 50%; background: var(--thumb, var(--azure)); border: 3px solid var(--panel);
+    box-shadow: 0 1px 4px rgba(0,0,0,.25); }
+  input[type=range]::-moz-range-thumb { width: 22px; height: 22px; border-radius: 50%; background: var(--thumb, var(--azure));
+    border: 3px solid var(--panel); box-shadow: 0 1px 4px rgba(0,0,0,.25); }
+  input[type=range]:focus-visible { box-shadow: 0 0 0 3px var(--azure-soft); }
+  #cap { --thumb: var(--azure); } #price { --thumb: var(--coral); }
+
+  .btns { display: flex; gap: 10px; flex-wrap: wrap; }
+  button { font-family: var(--sans); font-size: 14.5px; font-weight: 650; padding: 11px 18px; border-radius: 11px;
+    border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer; }
+  button:hover { background: var(--sunk); }
+  button:focus-visible { outline: 2px solid var(--azure); outline-offset: 2px; }
+  button.primary { background: var(--good); border-color: var(--good); color: #fff; }
+  button.primary:hover { filter: brightness(1.06); }
+  button.ghost { color: var(--muted); }
+
+  .readout { border-top: 1px solid var(--line); background: var(--sunk); padding: 16px 18px; display: grid; gap: 12px; }
+  .why { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+  .why .h { font-family: var(--mono); font-size: 11px; letter-spacing: .05em; text-transform: uppercase;
+    color: var(--faint); font-weight: 700; margin-bottom: 10px; }
+  .step3 { display: grid; gap: 8px; }
+  .step3 .r { display: grid; grid-template-columns: 20px 1fr auto; gap: 10px; align-items: baseline; font-size: 14px; }
+  .step3 .r + .r { padding-top: 8px; border-top: 1px dashed var(--line); }
+  .step3 .n { font-family: var(--mono); color: var(--faint); font-size: 12.5px; }
+  .step3 .lab { color: var(--muted); }
+  .step3 .lab b { color: var(--ink); font-family: var(--mono); }
+  .step3 .eq { font-family: var(--mono); font-weight: 700; font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+  .step3 .r.result { background: var(--azure-soft); margin: 2px -8px -2px; padding: 8px; border-radius: 9px; border-top: none; }
+  .step3 .r.result .eq { color: var(--azure); font-size: 15px; }
+  .formula { background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    padding: 12px 15px; font-family: var(--mono); font-size: 13.5px; overflow-x: auto; white-space: nowrap; color: var(--muted); }
+  .formula b { color: var(--ink); }
+  .formula .az { color: var(--azure); font-weight: 700; }
+  .formula .co { color: var(--coral); font-weight: 700; }
+
+  .hist { margin: 22px 0 0; }
+  .hist h2 { font-size: 14px; margin: 0 0 10px; display: flex; align-items: center; gap: 8px; }
+  .hist h2 span { font-family: var(--mono); font-size: 12px; color: var(--faint); font-weight: 400; }
+  .hlist { display: grid; gap: 8px; }
+  .hitem { display: grid; grid-template-columns: 30px 1fr auto; gap: 12px; align-items: center;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 11px; padding: 10px 14px; font-size: 13.5px; }
+  .hitem .n { font-family: var(--mono); font-weight: 700; color: var(--good); }
+  .hitem .d { color: var(--muted); }
+  .hitem .d b { color: var(--ink); font-family: var(--mono); }
+  .hitem .res { font-family: var(--mono); font-size: 12.5px; color: var(--azure); font-weight: 700; text-align: right; white-space: nowrap; }
+  .hempty { color: var(--faint); font-size: 13.5px; padding: 6px 2px; }
+
+  .learn { display: grid; gap: 10px; margin: 26px 0 0; }
+  .lrow { display: grid; grid-template-columns: 26px 1fr; gap: 12px; align-items: baseline; }
+  .lrow .n { font-family: var(--mono); font-weight: 700; color: var(--azure); }
+  .lrow p { margin: 0; color: var(--muted); font-size: 14.5px; }
+  .lrow p b { color: var(--ink); }
+
+  .foot { margin-top: 30px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--faint); font-size: 12.5px; }
+  .foot code { font-family: var(--mono); color: var(--muted); }
+
+  @media (prefers-reduced-motion: no-preference) { #pulse { animation: pulse 1.8s ease-out infinite; transform-origin: center; } }
+  @keyframes pulse { 0% { r: 9; opacity: .5; } 100% { r: 22; opacity: 0; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <span class="eyebrow">Rebalancing · เล่นได้จริง</span>
+    <h1>ลากแถบ “ทุน” แล้วดูเส้นหมุนรอบจุดส้ม</h1>
+    <p class="lede">จุดส้มคือ<b>มูลค่าพอร์ตตอนนี้</b> เวลาปรับทุน เส้นจะ<b>หมุนรอบจุดนั้น ไม่กระโดด</b> — งานของ <code style="font-family:var(--mono)">beta</code> คือทำให้มันไม่กระโดดนี่แหละ</p>
+  </header>
+
+  <div class="app">
+    <div class="hint">
+      <span class="ic">👉</span>
+      <div>ลาก <b>“ทุน”</b> ดูเส้นฟ้าหมุน แต่<b>จุดส้มไม่ขยับ</b> — เลื่อนดูเลข 3 ขั้นด้านล่างว่าทำไม แล้วกด <b>“ยืนยันการปรับ”</b> เพื่อบันทึกสเต็ป</div>
+    </div>
+
+    <div class="current">
+      <span class="clab">ค่าปัจจุบัน</span>
+      <span class="cchip"><span class="ck">beta</span><span class="cv" id="curA">0.00</span></span>
+      <span class="cchip"><span class="ck">c</span><span class="cv" id="curC">100</span></span>
+      <span class="cchip"><span class="ck">P′</span><span class="cv" id="curP">100</span></span>
+    </div>
+
+    <div class="chart-box">
+      <div class="chart-wrap">
+        <svg id="chart" viewBox="0 0 740 380" role="img" aria-label="กราฟค่าพอร์ตเทียบกับราคา ลากเพื่อดูเส้นหมุนรอบจุดปัจจุบัน"></svg>
+      </div>
+      <div class="glabels"><span>ราคาถูกลง ←</span><span>ราคา (p)</span><span>→ ราคาแพงขึ้น</span></div>
+    </div>
+
+    <div class="controls">
+      <div class="slider">
+        <div class="top">
+          <span class="name"><i class="swatch" style="background:var(--azure)"></i> ทุนใหม่ (c′) <small>= ความชันเส้นใหม่ที่จะปรับไป</small></span>
+          <span class="val" id="capVal" style="color:var(--azure)">100</span>
+        </div>
+        <input type="range" id="cap" min="40" max="240" step="5" value="100" aria-label="ทุนใหม่ c′">
+      </div>
+      <div class="slider">
+        <div class="top">
+          <span class="name"><i class="swatch" style="background:var(--coral)"></i> ราคาขณะปรับ (P′) <small>= จุดที่เส้นเก่า-ใหม่ต้องแตะกัน</small></span>
+          <span class="val" id="priceVal" style="color:var(--coral)">100</span>
+        </div>
+        <input type="range" id="price" min="55" max="165" step="1" value="100" aria-label="ราคาขณะปรับ P′">
+      </div>
+      <div class="btns">
+        <button class="primary" id="commit">✓ ยืนยันการปรับ</button>
+        <button id="example">ลองตัวอย่าง (ทุน→200 ที่ราคา 120)</button>
+        <button class="ghost" id="reset">รีเซ็ต</button>
+      </div>
+    </div>
+
+    <div class="readout">
+      <div class="why">
+        <div class="h">beta += (c − c′) · ln(P′/p₀)</div>
+        <div class="step3">
+          <div class="r"><span class="n">1</span><span class="lab">beta เดิม (ค่าที่มีอยู่แล้ว)</span><span class="eq" id="s1">0.00</span></div>
+          <div class="r"><span class="n">2</span><span class="lab">(c <b id="s2c">100</b> − c′ <b id="s2cp">100</b>) · ln(P′ <b id="s2P">100</b> /100)</span><span class="eq" id="s2">0.00</span></div>
+          <div class="r result"><span class="n">=</span><span class="lab">beta เดิม + ผลบวก → <b>beta ใหม่</b></span><span class="eq" id="s3">0.00</span></div>
+        </div>
+      </div>
+      <div class="formula" id="formula"></div>
+    </div>
+  </div>
+
+  <div class="hist">
+    <h2>สเต็ปที่ปรับไปแล้ว <span id="histCount">(0 สเต็ป)</span></h2>
+    <div class="hlist" id="hlist"><div class="hempty">ยังไม่มี — ลากทุน แล้วกด “ยืนยันการปรับ” เพื่อบันทึกสเต็ปแรก</div></div>
+  </div>
+
+  <div class="learn">
+    <div class="lrow"><span class="n">1</span><p><b>ค่าพอร์ต = เส้น</b> บนกราฟราคา · ยิ่งทุนมาก เส้นยิ่ง<b>ชัน</b></p></div>
+    <div class="lrow"><span class="n">2</span><p><b>ปรับทุน = หมุนเส้นรอบจุดปัจจุบัน</b> · จุดไม่ขยับ = มูลค่าพอร์ตไม่กระโดด — นี่คือ dynamic</p></div>
+    <div class="lrow"><span class="n">3</span><p>แบบเดิมต้องจำ <b>t, c, beta</b> · แบบง่ายจำแค่ <b>c, beta</b> (p₀ ตรึงไว้) · ผลเท่ากันทุกจุด</p></div>
+  </div>
+
+  <p class="foot">แปลนเต็ม + โค้ด refactor <code>BetaCalculator.tsx</code> อยู่ที่ <code>skill.md › dynamic-rebalancing-calculator/SKILL.md</code></p>
+</div>
+
+<script>
+(function () {
+  var NS = "http://www.w3.org/2000/svg";
+  var svg = document.getElementById("chart");
+  var W = 740, H = 380, m = { l: 48, r: 20, t: 22, b: 34 };
+  var iw = W - m.l - m.r, ih = H - m.t - m.b;
+  var p0 = 100, pMin = 52, pMax = 168;
+  var LN = Math.log;
+
+  // committed state (c, A);  V(p) = A + c*ln(p/p0)
+  var cC = 100, AC = 0, PC = 100;
+  var history = [];
+
+  var capEl = document.getElementById("cap"), priceEl = document.getElementById("price");
+
+  function el(t, a, txt) { var e = document.createElementNS(NS, t); for (var k in a) e.setAttribute(k, a[k]);
+    if (txt != null) e.textContent = txt; return e; }
+  function Vc(p) { return AC + cC * LN(p / p0); }               // committed line
+  function yRange() {
+    var lo = Math.min(Vc(pMin), Vc(pMax)), hi = Math.max(Vc(pMin), Vc(pMax));
+    var pad = Math.max(12, (hi - lo) * 0.28); return [lo - pad, hi + pad];
+  }
+  var yr = yRange();
+  function X(p) { return m.l + (p - pMin) / (pMax - pMin) * iw; }
+  function Y(v) { return m.t + (1 - (v - yr[0]) / (yr[1] - yr[0])) * ih; }
+  function curve(fn) { var d = "", first = true;
+    for (var p = pMin; p <= pMax + .001; p += 2) { d += (first ? "M" : "L") + X(p).toFixed(1) + " " + Y(fn(p)).toFixed(1) + " "; first = false; }
+    return d.trim(); }
+  function fmt(x, d) { d = d == null ? 2 : d; return (Math.round(x * Math.pow(10, d)) / Math.pow(10, d)).toFixed(d); }
+
+  function redraw() {
+    yr = yRange();
+    var c = +capEl.value, P = +priceEl.value;
+    var pivot = Vc(P);                       // มูลค่าพอร์ตตอนนี้ (บนเส้นที่ยืนยันแล้ว)
+    var Apre = pivot - c * LN(P / p0);       // A ใหม่ถ้าปรับทุนเป็น c ที่ราคา P
+    function Vp(p) { return Apre + c * LN(p / p0); }
+
+    document.getElementById("capVal").textContent = c;
+    document.getElementById("priceVal").textContent = P;
+
+    // ---- build svg ----
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+    // grid + price ticks
+    [60, 80, 100, 120, 140, 160].forEach(function (pr) {
+      if (pr < pMin || pr > pMax) return;
+      svg.appendChild(el("line", { x1: X(pr), y1: m.t, x2: X(pr), y2: m.t + ih, stroke: "var(--grid)", "stroke-width": 1 }));
+      svg.appendChild(el("text", { x: X(pr), y: m.t + ih + 20, fill: "var(--faint)", "font-size": 11.5,
+        "font-family": "var(--mono)", "text-anchor": "middle" }, pr));
+    });
+    // zero-value line if in range
+    if (0 > yr[0] && 0 < yr[1]) svg.appendChild(el("line", { x1: m.l, y1: Y(0), x2: m.l + iw, y2: Y(0),
+      stroke: "var(--grid)", "stroke-width": 1, "stroke-dasharray": "2 4" }));
+    // axes
+    svg.appendChild(el("line", { x1: m.l, y1: m.t, x2: m.l, y2: m.t + ih, stroke: "var(--line)", "stroke-width": 1.5 }));
+    svg.appendChild(el("line", { x1: m.l, y1: m.t + ih, x2: m.l + iw, y2: m.t + ih, stroke: "var(--line)", "stroke-width": 1.5 }));
+    svg.appendChild(el("text", { x: m.l - 8, y: m.t + 8, fill: "var(--faint)", "font-size": 11.5, "font-family": "var(--mono)", "text-anchor": "end" }, "ค่า"));
+
+    // committed line (faint dashed) — only meaningful when it differs from preview
+    var same = Math.abs(c - cC) < 0.5;
+    if (!same) svg.appendChild(el("path", { d: curve(Vc), fill: "none", stroke: "var(--slate)",
+      "stroke-width": 2, "stroke-dasharray": "6 5", "stroke-linecap": "round" }));
+
+    // preview / current line
+    svg.appendChild(el("path", { d: curve(Vp), fill: "none", stroke: "var(--azure)", "stroke-width": 3.4,
+      "stroke-linecap": "round", "stroke-linejoin": "round" }));
+
+    // vertical guide at P
+    svg.appendChild(el("line", { x1: X(P), y1: m.t, x2: X(P), y2: m.t + ih, stroke: "var(--coral)",
+      "stroke-width": 1.2, "stroke-dasharray": "3 4", opacity: .5 }));
+
+    // pivot dot (coral) — stays put while ทุน changes
+    svg.appendChild(el("circle", { id: "pulse", cx: X(P), cy: Y(pivot), r: 9, fill: "var(--coral)", opacity: .4 }));
+    svg.appendChild(el("circle", { cx: X(P), cy: Y(pivot), r: 7, fill: "var(--coral)", stroke: "var(--panel)", "stroke-width": 3 }));
+    // pivot label
+    var lx = X(P) > W - 150 ? X(P) - 12 : X(P) + 12;
+    var anch = X(P) > W - 150 ? "end" : "start";
+    svg.appendChild(el("text", { x: lx, y: Y(pivot) - 12, fill: "var(--coral)", "font-size": 12.5, "font-weight": 700,
+      "font-family": "var(--sans)", "text-anchor": anch }, "พอร์ต = " + fmt(pivot)));
+    svg.appendChild(el("text", { x: lx, y: Y(pivot) + 4, fill: "var(--faint)", "font-size": 11,
+      "font-family": "var(--sans)", "text-anchor": anch }, "จุดนี้ไม่กระโดด"));
+
+    // ---- 3-step breakdown: A += (c − c′) · ln(P/p₀) ----
+    var diffTerm = (cC - c) * LN(P / p0);   // (c_เดิม − c′_ใหม่) · ln(P/p0)
+    document.getElementById("s2c").textContent = cC;
+    document.getElementById("s2cp").textContent = c;
+    document.getElementById("s2P").textContent = P;
+    document.getElementById("s1").textContent = fmt(AC);
+    document.getElementById("s2").textContent = fmt(diffTerm);
+    document.getElementById("s3").textContent = fmt(Apre);
+
+    document.getElementById("curA").textContent = fmt(AC);
+    document.getElementById("curC").textContent = cC;
+    document.getElementById("curP").textContent = PC;
+
+    document.getElementById("formula").innerHTML =
+      'beta=<b>' + fmt(Apre) + '</b>' +
+      '&nbsp;&nbsp;,&nbsp;&nbsp;<span class="az">c′=' + c + '</span>' +
+      '&nbsp;&nbsp;,&nbsp;&nbsp;<span class="co">P′=' + P + '</span>';
+
+    return { c: c, P: P, pivot: pivot, Apre: Apre };
+  }
+
+  function commit() {
+    var s = redraw();
+    var prevC = cC, prevP = PC;
+    cC = s.c; AC = s.Apre; PC = s.P;
+    history.push({ Pold: prevP, P: s.P, cOld: prevC, cNew: s.c, A: s.Apre });
+    renderHist();
+    redraw();
+  }
+
+  function renderHist() {
+    var list = document.getElementById("hlist");
+    document.getElementById("histCount").textContent = "(" + history.length + " สเต็ป)";
+    if (!history.length) { list.innerHTML = '<div class="hempty">ยังไม่มี — ลากทุน แล้วกด “ยืนยันการปรับ” เพื่อบันทึกสเต็ปแรก</div>'; return; }
+    list.innerHTML = "";
+    history.forEach(function (h, i) {
+      var row = document.createElement("div"); row.className = "hitem";
+      row.innerHTML = '<span class="n">#' + (i + 1) + '</span>' +
+        '<span class="d">ที่ราคา <b>' + h.Pold + '</b> → <b>' + h.P + '</b> · ปรับทุน <b>' + h.cOld + '</b> → <b>' + h.cNew + '</b></span>' +
+        '<span class="res">beta=' + fmt(h.A) + '</span>';
+      list.appendChild(row);
+    });
+  }
+
+  capEl.addEventListener("input", redraw);
+  priceEl.addEventListener("input", redraw);
+  document.getElementById("commit").addEventListener("click", commit);
+  document.getElementById("reset").addEventListener("click", function () {
+    cC = 100; AC = 0; PC = 100; history = []; capEl.value = 100; priceEl.value = 100; renderHist(); redraw();
+  });
+  document.getElementById("example").addEventListener("click", function () {
+    priceEl.value = 120; capEl.value = 200; redraw();
+  });
+
+  redraw();
+})();
+</script>

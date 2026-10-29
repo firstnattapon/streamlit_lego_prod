@@ -1,0 +1,13 @@
+# Exact versions preserve the reviewed UI/output and keep future resolver runs
+# from silently changing the dashboard. Upgrade only through the full suite.
+streamlit==1.55.0
+firebase-admin==6.9.0
+# Keep Firebase Admin's transitive Firestore client on a protobuf-5-compatible line.
+google-cloud-firestore==2.21.0
+pandas==2.3.3
+# Must match lego-firebase exactly: DNA uses np.random.default_rng and NumPy does
+# not guarantee an identical Generator bit stream across versions.
+numpy==2.4.6
+# Reviewed compatible version: Streamlit allows <7 and Webull SDK requires <6.
+protobuf==5.29.6
+
