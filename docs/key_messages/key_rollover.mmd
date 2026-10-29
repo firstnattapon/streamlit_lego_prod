@@ -1,0 +1,17 @@
+flowchart TD
+    S["ทุนเปลี่ยน Fix_c → Fix_c_new<br/>ที่ราคา P_acted"] --> K["เปลี่ยนความชัน ไม่ใช่ย้ายจุด<br/>A, E, R ที่ P_acted ไม่ขยับสักบาท"]
+
+    K --> B["beta += (Fix_c − Fix_c_new) * ln(P_acted / P₀)<br/>Fix_c = Fix_c_new"]
+
+    B --> V["มองอีกแบบ beta ไม่ใช่ตัวแปรที่สอง<br/>P_avg = P₀ * exp(−beta / Fix_c)<br/>R = Fix_c * ln(P / P_avg)"]
+    V --> X["P_avg = ราคาที่ R = 0 (ต้นทุนเฉลี่ยของเส้นอ้างอิง)<br/>ไม่ใช่ราคาทุนของหุ้นที่ถือจริง<br/>ทุน 100 → 200 ที่ราคา 120, P₀ = 100 ได้ 109.54"]
+
+    B --> G["เกียร์ถอยมีอยู่แล้ว<br/>ลด Fix_c ก็ E ไม่กระโดด<br/>แต่ Option Scale มีกฎขยายอย่างเดียว"]
+
+    classDef calc fill:#e8f1ff,stroke:#3b6fd4,color:#111;
+    classDef act fill:#fff4d6,stroke:#d49a1a,color:#111;
+    classDef gap fill:#ffe9e9,stroke:#d43b3b,color:#111;
+
+    class S,K calc;
+    class B act;
+    class V,X,G gap;
