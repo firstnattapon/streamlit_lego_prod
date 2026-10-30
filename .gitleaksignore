@@ -1,0 +1,6 @@
+# fixtures/paper_session.json of bd78286: generic-api-key matched every chain_key value,
+# "UBER_2481f5db53c9", the RTDB chain name of a fake test session (symbol plus a config-hash
+# prefix), not a credential. The next commit replaces it with a placeholder. Exact historical
+# finding only: no rule, path or pattern is allowlisted (the fixture is one line, so the 52
+# matches share this fingerprint).
+bd78286594d0a03be90e2e68e4cf3a581126f65d:fixtures/paper_session.json:generic-api-key:1
