@@ -31,6 +31,20 @@ gcloud iam service-accounts keys create lego-dash-prod.json --iam-account=lego-d
 
 นำเนื้อหาของ `lego-dash-prod.json` ไปใส่ใน `FIREBASE_SA_JSON` แล้วลบไฟล์ทิ้ง (`rm lego-dash-prod.json`)
 
+## ดู PAPER (ไม่บังคับ)
+
+`LEGO_MODE=paper` ของ lego เก็บจำนวนหุ้นและ fill ปลอมไว้ใน database แยกชื่อ `lego-firebase-paper` จึงไม่ปนกับ `lego-firebase-prod`
+ถ้าจะดูใน dashboard ให้เพิ่ม secret นี้:
+
+```toml
+FIREBASE_DB_URL_PAPER = "https://lego-firebase-paper.asia-southeast1.firebasedatabase.app"
+```
+
+- sidebar จะมีตัวเลือก **ฐานข้อมูล: PROD / PAPER (จำลอง)** (ค่าเริ่มต้นคือ PROD)
+- ใช้ service account เดิม เพราะ `roles/firebasedatabase.viewer` ระดับ project อ่านได้ทุก database
+- ตอนเลือก PAPER ทั้งหน้าจะมีป้ายสีส้ม **PAPER** และ chain ที่ backend ตีตราว่า paper จะมีป้ายนี้เสมอไม่ว่าอยู่ database ไหน
+- ไม่ตั้ง secret นี้ = หน้า PROD อย่างเดียวเหมือนเดิม
+
 ---
 
 อัปเดตการตรวจข้อมูลต้นฉบับและ baseline ซื้อครั้งแรก:

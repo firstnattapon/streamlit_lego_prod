@@ -103,6 +103,23 @@ def _secrets_ready() -> bool:
     return _has_secret("FIREBASE_SA_JSON") and _has_secret("FIREBASE_DB_URL")
 
 
+# LEGO_MODE=paper เก็บหุ้นและ fill ปลอมใน database แยก (lego-firebase-paper) ของ project เดียวกัน
+PAPER_DB_SECRET = "FIREBASE_DB_URL_PAPER"
+DATABASE_PROD, DATABASE_PAPER = "PROD", "PAPER (จำลอง)"
+
+
+def _paper_url() -> str | None:
+    """database ของ paper เมื่อ secret (ไม่บังคับ) FIREBASE_DB_URL_PAPER ระบุไว้"""
+    if not _has_secret(PAPER_DB_SECRET):
+        return None
+    return str(st.secrets[PAPER_DB_SECRET]).strip() or None
+
+
+def _ref(path: str, paper: bool = False):
+    """อ่านอย่างเดียว: PROD ตามเดิม หรือ database ของ paper (app และ service account เดียวกัน)"""
+    return db.reference(path, url=_paper_url()) if paper else db.reference(path)
+
+
 @st.cache_resource
 def _init():
     if not firebase_admin._apps:
@@ -111,8 +128,8 @@ def _init():
     return True
 
 
-def load_rows() -> pd.DataFrame:
-    return rows_to_df(db.reference(ROWS_PATH).get())
+def load_rows(paper: bool = False) -> pd.DataFrame:
+    return rows_to_df(_ref(ROWS_PATH, paper).get())
 
 
 def render_ledger_table(show: pd.DataFrame, persisted_df: pd.DataFrame,
@@ -142,7 +159,7 @@ def render_ledger_table(show: pd.DataFrame, persisted_df: pd.DataFrame,
     st.dataframe(show, width="stretch")
 
 
-def render_live_dashboard() -> None:
+def render_live_dashboard(paper: bool = False) -> None:
     # แท็บนี้ต้องมี Firebase — ไม่มี secrets ก็แค่แจ้ง แล้วไม่ล้มทั้งหน้า (แท็บ 101 ยังใช้ได้)
     if not _secrets_ready():
         st.info("ตั้ง st.secrets: FIREBASE_SA_JSON และ FIREBASE_DB_URL ก่อน จึงจะเห็น "
@@ -151,7 +168,7 @@ def render_live_dashboard() -> None:
     _init()
 
     health = _lego_dash_core.system_health_rows(
-        db.reference("webull_lego_warnings").get())
+        _ref("webull_lego_warnings", paper).get())
     if not health.empty:
         if health["state"].eq("ACTIVE").any():
             st.error("ระบบพักการทำงานจากปัญหา Authentication — ตรวจ credentials/token และเวลาลองใหม่")
@@ -159,12 +176,12 @@ def render_live_dashboard() -> None:
             st.dataframe(health, width="stretch")
             st.caption("RESOLVED/HISTORY เป็นประวัติ ไม่ใช่หลักฐานว่าบัญชีพร้อมเทรดเงินจริง")
 
-    state = db.reference(STATE_PATH).get() or {}
+    state = _ref(STATE_PATH, paper).get() or {}
     if state:
         st.subheader("State pointer (anchor ปัจจุบัน)")
         st.dataframe(pd.DataFrame(state).T, width="stretch")
 
-    df = load_rows()
+    df = load_rows(paper)
     if df.empty:
         st.info("ยังไม่มีแถว committed — รอ Cloud Function รอบแรก")
         return
@@ -181,6 +198,10 @@ def render_live_dashboard() -> None:
         st.caption(f"Chain: {chains[0]}")
     else:
         selected = None
+    if selected and isinstance(state, dict) and (state.get(selected) or {}).get("paper"):
+        # ตีตราจาก backend (LEGO_MODE=paper) — ขึ้นแม้ chain paper จะไปอยู่ผิด database
+        st.markdown(":orange-background[**PAPER**] chain นี้: จำนวนหุ้นและ fill เป็นการจำลอง "
+                    "(Preview จริง ไม่เคย Place) ไม่ใช่เงินจริง")
 
     execution_mode = ("semantics" in df.columns
                       and df["semantics"].astype(str).isin([
@@ -267,7 +288,7 @@ def render_live_dashboard() -> None:
             st.error("พบแถวที่ไม่สอดคล้องสมการ — ตรวจ chain/engine ก่อนเชื่อกราฟ")
 
     # audit เฉพาะ chain ที่เลือก — ผูกด้วย run_id กัน order ข้าม chain ปนตาราง
-    audit = db.reference(AUDIT_PATH).get() or {}
+    audit = _ref(AUDIT_PATH, paper).get() or {}
     if audit:
         run_ids = df["run_id"] if "run_id" in df.columns else []
         adf = filter_audit_rows(audit, run_ids)
@@ -497,9 +518,15 @@ def render_cheat_sheets() -> None:
 PROD_DB_INSTANCE = "lego-firebase-prod"
 
 
-def render_prod_banner() -> None:
+def render_prod_banner(paper: bool = False) -> None:
     """ป้ายบอกว่าหน้านี้คือ PROD และเตือนถ้า secrets ชี้ไป DB อื่น (เตือนเท่านั้น ไม่บล็อก)"""
     # markdown ไม่ใช่ st.warning: เทสต์เดิมใช้ "ไม่มี warning" เป็นสัญญาณว่าหน้าปกติ
+    if paper:
+        st.markdown(":orange-background[**PAPER**] จำนวนหุ้นและ fill ในหน้านี้เป็นการจำลอง "
+                    "ไม่ใช่เงินจริง: Preview จริง แต่ไม่เคย Place (อ่านจาก FIREBASE_DB_URL_PAPER)")
+        if "paper" not in str(_paper_url()):
+            st.error("FIREBASE_DB_URL_PAPER ไม่ได้ชี้ไป database ของ paper — ตรวจ st.secrets")
+        return
     st.markdown(f":red-background[**PROD**] อ่านข้อมูลบัญชีจริงของ lego-tick-prod "
                 f"จาก {PROD_DB_INSTANCE} (read-only)")
     if _secrets_ready() and PROD_DB_INSTANCE not in str(st.secrets["FIREBASE_DB_URL"]):
@@ -510,12 +537,16 @@ def render_prod_banner() -> None:
 def main():
     st.set_page_config(page_title="LEGO PROD", layout="wide")
     st.title("🧬 LEGO Shannon Demon: PROD")
-    render_prod_banner()
+    # ตัวเลือกมีเฉพาะเมื่อตั้ง FIREBASE_DB_URL_PAPER ไว้ ไม่ตั้ง = PROD อย่างเดียวเหมือนเดิม
+    paper = (_paper_url() is not None
+             and st.sidebar.radio("ฐานข้อมูล", [DATABASE_PROD, DATABASE_PAPER],
+                                  key="database") == DATABASE_PAPER)
+    render_prod_banner(paper)
 
     tab_live, tab_101, tab_web, tab_cheat = st.tabs(
         ["📊 Live Dashboard", "🎓 Rebalancing 101", "🌐 Web Apps", "⚡ Cheat Sheet"])
     with tab_live:
-        render_live_dashboard()
+        render_live_dashboard(paper)
     with tab_101:
         render_rebalancing_101()
     with tab_web:
