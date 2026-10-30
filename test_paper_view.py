@@ -83,3 +83,17 @@ def test_the_paper_ledger_needs_no_recompute():
     assert lego_dash_core.count_ledger_corrections(df, fixed) == 0
     report, ok = lego_dash_core.integrity_report(df, p0_hint=p0)
     assert ok, report
+
+
+def test_the_paper_database_alone_is_enough(monkeypatch):
+    calls = []
+    databases(monkeypatch, prod=None, paper=PAPER, calls=calls)
+    page = AppTest.from_file(str(ROOT / "streamlit_app.py"))
+    page.secrets.update({"FIREBASE_SA_JSON": "{}", "FIREBASE_DB_URL_PAPER": PAPER_URL})
+    page.run(timeout=30)
+    assert not page.exception and not page.sidebar.radio            # nothing to switch to
+    assert {url for _, url in calls} == {PAPER_URL}                 # never the PROD default
+    texts = [m.value for m in page.markdown]
+    assert any("**PAPER**" in t for t in texts) and not any("**PROD**" in t for t in texts)
+    assert not page.error
+    assert any("ผ่านการตรวจสมการ" in s.value for s in page.success)

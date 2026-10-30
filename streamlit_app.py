@@ -99,20 +99,30 @@ def _has_secret(key: str) -> bool:
         return False
 
 
-def _secrets_ready() -> bool:
-    return _has_secret("FIREBASE_SA_JSON") and _has_secret("FIREBASE_DB_URL")
-
-
 # LEGO_MODE=paper เก็บหุ้นและ fill ปลอมใน database แยก (lego-firebase-paper) ของ project เดียวกัน
-PAPER_DB_SECRET = "FIREBASE_DB_URL_PAPER"
+PROD_DB_SECRET, PAPER_DB_SECRET = "FIREBASE_DB_URL", "FIREBASE_DB_URL_PAPER"
 DATABASE_PROD, DATABASE_PAPER = "PROD", "PAPER (จำลอง)"
 
 
-def _paper_url() -> str | None:
-    """database ของ paper เมื่อ secret (ไม่บังคับ) FIREBASE_DB_URL_PAPER ระบุไว้"""
-    if not _has_secret(PAPER_DB_SECRET):
+def _secret_url(key: str) -> str | None:
+    if not _has_secret(key):
         return None
-    return str(st.secrets[PAPER_DB_SECRET]).strip() or None
+    return str(st.secrets[key]).strip() or None
+
+
+def _prod_url() -> str | None:
+    """database ของ PROD — ไม่ตั้ง = หน้านี้อ่าน paper อย่างเดียว"""
+    return _secret_url(PROD_DB_SECRET)
+
+
+def _paper_url() -> str | None:
+    """database ของ paper เมื่อ secret FIREBASE_DB_URL_PAPER ระบุไว้"""
+    return _secret_url(PAPER_DB_SECRET)
+
+
+def _secrets_ready() -> bool:
+    """ต้องมี service account และ database อย่างน้อยหนึ่งตัว (PROD หรือ paper)"""
+    return _has_secret("FIREBASE_SA_JSON") and bool(_prod_url() or _paper_url())
 
 
 def _ref(path: str, paper: bool = False):
@@ -124,7 +134,8 @@ def _ref(path: str, paper: bool = False):
 def _init():
     if not firebase_admin._apps:
         cred = credentials.Certificate(json.loads(st.secrets["FIREBASE_SA_JSON"]))
-        firebase_admin.initialize_app(cred, {"databaseURL": st.secrets["FIREBASE_DB_URL"]})
+        # ไม่มี PROD ก็ตั้ง app บน paper — หน้า paper ระบุ url เองทุกครั้งอยู่แล้ว
+        firebase_admin.initialize_app(cred, {"databaseURL": _prod_url() or _paper_url()})
     return True
 
 
@@ -162,7 +173,7 @@ def render_ledger_table(show: pd.DataFrame, persisted_df: pd.DataFrame,
 def render_live_dashboard(paper: bool = False) -> None:
     # แท็บนี้ต้องมี Firebase — ไม่มี secrets ก็แค่แจ้ง แล้วไม่ล้มทั้งหน้า (แท็บ 101 ยังใช้ได้)
     if not _secrets_ready():
-        st.info("ตั้ง st.secrets: FIREBASE_SA_JSON และ FIREBASE_DB_URL ก่อน จึงจะเห็น "
+        st.info("ตั้ง st.secrets: FIREBASE_SA_JSON และ FIREBASE_DB_URL หรือ FIREBASE_DB_URL_PAPER ก่อน จึงจะเห็น "
                 "ข้อมูลสด — ระหว่างนี้เปิดแท็บ 🎓 Rebalancing 101 เพื่อลอง gated demo ได้เลย")
         return
     _init()
@@ -529,7 +540,7 @@ def render_prod_banner(paper: bool = False) -> None:
         return
     st.markdown(f":red-background[**PROD**] อ่านข้อมูลบัญชีจริงของ lego-tick-prod "
                 f"จาก {PROD_DB_INSTANCE} (read-only)")
-    if _secrets_ready() and PROD_DB_INSTANCE not in str(st.secrets["FIREBASE_DB_URL"]):
+    if _secrets_ready() and PROD_DB_INSTANCE not in str(_prod_url()):
         st.error(f"FIREBASE_DB_URL ไม่ได้ชี้ไป {PROD_DB_INSTANCE} อาจเป็น DB ของ UAT "
                  "ตรวจ st.secrets ก่อนเชื่อตัวเลขในหน้านี้")
 
@@ -537,10 +548,15 @@ def render_prod_banner(paper: bool = False) -> None:
 def main():
     st.set_page_config(page_title="LEGO PROD", layout="wide")
     st.title("🧬 LEGO Shannon Demon: PROD")
-    # ตัวเลือกมีเฉพาะเมื่อตั้ง FIREBASE_DB_URL_PAPER ไว้ ไม่ตั้ง = PROD อย่างเดียวเหมือนเดิม
-    paper = (_paper_url() is not None
-             and st.sidebar.radio("ฐานข้อมูล", [DATABASE_PROD, DATABASE_PAPER],
-                                  key="database") == DATABASE_PAPER)
+    # ตั้งทั้งคู่ = มีตัวเลือก; ตั้ง FIREBASE_DB_URL_PAPER อย่างเดียว = paper อย่างเดียว
+    # ไม่ตั้ง FIREBASE_DB_URL_PAPER = PROD อย่างเดียวเหมือนเดิม
+    if _paper_url() is None:
+        paper = False
+    elif _prod_url() is None:
+        paper = True
+    else:
+        paper = st.sidebar.radio("ฐานข้อมูล", [DATABASE_PROD, DATABASE_PAPER],
+                                 key="database") == DATABASE_PAPER
     render_prod_banner(paper)
 
     tab_live, tab_101, tab_web, tab_cheat = st.tabs(
