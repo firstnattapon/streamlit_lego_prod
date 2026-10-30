@@ -18,6 +18,37 @@ import pandas as pd
 MAX_HEIGHT = 520       # px ของกรอบตาราง — เกินนี้เลื่อนในกรอบ
 MIN_HEIGHT = 300       # เตี้ยกว่านี้ tooltip หลายบรรทัดไม่มีที่แสดง
 
+# สีพื้นทั้งแถวตามคอลัมน์ "สถานะ" (alpha 0.2 อ่านได้ทั้งธีมสว่าง/มืด); PASS_* ใช้สีเดิม
+STATUS_COL = "สถานะ"
+STATUS_FILLS = {
+    "READY_BUY": ("buy", "rgba(0, 170, 0, 0.2)"),
+    "READY_SELL": ("sell", "rgba(220, 0, 0, 0.2)"),
+}
+
+
+def _status_fill(frame: pd.DataFrame, i: int) -> tuple[str, str] | None:
+    if STATUS_COL not in frame.columns:
+        return None
+    return STATUS_FILLS.get(str(frame.iloc[i][STATUS_COL]))
+
+
+def style_status_rows(frame: pd.DataFrame, money_cols=()):
+    """Styler สำหรับ st.dataframe: แถว READY_BUY เขียว / READY_SELL แดง (alpha 0.2)
+
+    Styler ใช้ค่าที่จัดรูปแล้ว จึงกำหนดรูปแบบเองให้ตรงกับตาราง HTML:
+    คอลัมน์เงิน 2 ตำแหน่ง ที่เหลือแสดงตามค่าจริง (ไม่ใช่ precision 6 ของ Styler)
+    """
+    frame = frame.reset_index(drop=True)
+
+    def fill(row: pd.Series) -> list[str]:
+        hit = _status_fill(frame, row.name)
+        css = f"background-color: {hit[1]}" if hit else ""
+        return [css] * len(row)
+
+    money = set(money_cols)
+    formats = {c: (lambda v, m=(c in money): _cell_text(v, m)) for c in frame.columns}
+    return frame.style.apply(fill, axis=1).format(formats)
+
 
 def hover_table_height(n_rows: int) -> int:
     """ความสูง iframe ที่พอดีกับจำนวนแถว (หัวตาราง ~46px + แถวละ ~30px)"""
@@ -67,6 +98,8 @@ th.tip::after{content:" ⓘ";color:var(--accent)}
 td.tip{background:var(--tipcol);cursor:help;text-decoration:underline dotted var(--accent);
 text-underline-offset:3px}
 tbody tr:hover td{background:var(--row)}
+tbody tr.buy td{background:%(buy)s}
+tbody tr.sell td{background:%(sell)s}
 tbody tr:hover td.tip,td.tip:hover,td.tip:focus{background:var(--hl);outline:none}
 td.tip:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
 #tip{position:fixed;display:none;z-index:9;max-width:min(560px,94vw);padding:8px 11px;
@@ -143,13 +176,17 @@ def build_hover_table_html(frame: pd.DataFrame, tips: list[dict[str, str]],
                 attr = f' data-tip="{html.escape(tip, quote=True)}" tabindex="0"'
             klass = f' class="{" ".join(classes)}"' if classes else ""
             cells.append(f"<td{klass}{attr}>{text}</td>")
-        body_rows.append("<tr>" + "".join(cells) + "</tr>")
+        hit = _status_fill(frame, i)
+        row_attr = f' class="{hit[0]}"' if hit else ""
+        body_rows.append(f"<tr{row_attr}>" + "".join(cells) + "</tr>")
 
     theme_attr = f' data-theme="{theme}"' if theme in ("light", "dark") else ""
     return (
         f'<!doctype html><html lang="th"{theme_attr}><head><meta charset="utf-8">'
         f'<meta name="viewport" content="width=device-width,initial-scale=1">'
-        f"<style>{_CSS % {'max_height': int(max_height) - 4}}</style></head><body>"
+        f"<style>{_CSS % {'max_height': int(max_height) - 4,
+                          'buy': STATUS_FILLS['READY_BUY'][1],
+                          'sell': STATUS_FILLS['READY_SELL'][1]}}</style></head><body>"
         f'<div class="wrap"><table><thead><tr>{head}</tr></thead>'
         f'<tbody>{"".join(body_rows)}</tbody></table></div>'
         f'<div id="tip" role="tooltip"></div><script>{_JS}</script></body></html>'

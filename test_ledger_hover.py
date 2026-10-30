@@ -16,8 +16,8 @@ from streamlit.testing.v1 import AppTest
 
 from lego_dash_core import (EXECUTION_CONFIRMED_SEMANTICS, LEDGER_COLS,
                             ledger_explanations, recompute_gated_ledger, rows_to_df)
-from lego_hover_table import (MAX_HEIGHT, MIN_HEIGHT, build_hover_table_html,
-                              hover_table_height)
+from lego_hover_table import (MAX_HEIGHT, MIN_HEIGHT, STATUS_FILLS, build_hover_table_html,
+                              hover_table_height, style_status_rows)
 from test_dash_core import FIX_C, HOLD, PRICES, SIGNALS, _mk_chain
 from test_execution_confirmed_contract import P0, _execution_fixture
 from test_v2_integrity_evidence import funding_row
@@ -247,6 +247,36 @@ def test_html_theme_attribute_and_height_bounds():
     assert hover_table_height(0) == MIN_HEIGHT
     assert hover_table_height(10_000) == MAX_HEIGHT
     assert MIN_HEIGHT <= hover_table_height(8) <= MAX_HEIGHT
+
+
+def _status_frame() -> pd.DataFrame:
+    return pd.DataFrame({"สถานะ": ["READY_BUY", "PASS_THRESHOLD", "READY_SELL", "PASS_DNA_ZERO"],
+                         "ราคา Pₙ (USD)": [10.126, 11.0, 12.0, float("nan")],
+                         "จำนวนสั่ง (หุ้น)": [1.5, 0.0, 3.0, 0.0]})
+
+
+def test_html_fills_ready_rows_green_and_red_and_leaves_pass_rows():
+    out = build_hover_table_html(_status_frame(), [], [], ["ราคา Pₙ (USD)"])
+    rows = out.split("<tbody>")[1].split("</tbody>")[0].split("</tr>")[:-1]
+    assert rows[0].startswith('<tr class="buy">')
+    assert rows[1].startswith("<tr><td")
+    assert rows[2].startswith('<tr class="sell">')
+    assert rows[3].startswith("<tr><td")
+    assert f"tr.buy td{{background:{STATUS_FILLS['READY_BUY'][1]}}}" in out
+    assert f"tr.sell td{{background:{STATUS_FILLS['READY_SELL'][1]}}}" in out
+    assert "0.2)" in STATUS_FILLS["READY_BUY"][1] and "0.2)" in STATUS_FILLS["READY_SELL"][1]
+
+
+def test_dataframe_styler_fills_ready_rows_and_keeps_2dp_money():
+    styler = style_status_rows(_status_frame(), ["ราคา Pₙ (USD)"])
+    styler._compute()
+    green = ("background-color", STATUS_FILLS["READY_BUY"][1])
+    red = ("background-color", STATUS_FILLS["READY_SELL"][1])
+    assert all(styler.ctx[(0, c)] == [green] for c in range(3))
+    assert all(styler.ctx[(2, c)] == [red] for c in range(3))
+    assert not any(styler.ctx.get((r, c)) for r in (1, 3) for c in range(3))
+    html_out = styler.to_html()
+    assert ">10.13<" in html_out and ">1.5<" in html_out   # เงิน 2dp, หุ้นตามค่าจริง
 
 
 # ---- Streamlit -------------------------------------------------------------

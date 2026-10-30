@@ -32,7 +32,7 @@ from firebase_admin import credentials, db
 
 from dna_engine import DNAError
 import lego_dash_core as _lego_dash_core
-from lego_hover_table import build_hover_table_html, hover_table_height
+from lego_hover_table import build_hover_table_html, hover_table_height, style_status_rows
 
 # Streamlit reruns the entry script in a long-lived process. During a hot deploy,
 # sys.modules can still hold the previous lego_dash_core while this file is newer.
@@ -167,7 +167,7 @@ def render_ledger_table(show: pd.DataFrame, persisted_df: pd.DataFrame,
         except Exception as exc:   # tooltip เป็นส่วนเสริม — ห้ามทำให้ตารางหลักล่ม
             st.warning(f"สร้างตารางแบบชี้เมาส์ไม่ได้ ({type(exc).__name__}: {exc}) "
                        "— แสดงตารางปกติแทน")
-    st.dataframe(show, width="stretch")
+    st.dataframe(style_status_rows(show, MONEY_COLS), width="stretch")
 
 
 def render_live_dashboard(paper: bool = False) -> None:
