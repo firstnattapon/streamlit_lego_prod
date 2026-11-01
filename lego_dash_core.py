@@ -48,7 +48,12 @@ LEGACY_DROPPED_COLS = ("ΔAₙ เงินจริง (USD)",)
 META_COLS = ["run_id", "chain_key", "version", "committed", "semantics",
              "market_slot_id", "market_ordinal", "clock_mode", "schema_version",
              "ledger_version_at_observation", "E_mark_at_observation",
-             "R_basis", "finalized_seq"]
+             "R_basis", "finalized_seq",
+             # LEAPS แทนหุ้น (LEGO_LEAPS): bot เขียนเป็น field แบนเฉพาะแถวที่ใช้ LEAPS
+             # ไม่ใช่คอลัมน์ที่ 18 — คอลัมน์ 7 = real_holdings + leaps_shares
+             "real_holdings", "leaps_shares", "leaps_shares_changed_from",
+             "post_execution_real_holdings"]
+HOLDINGS_COL = "จำนวนถือครอง (หุ้น)"
 
 # mirror ของ lego_state.CASHFLOW_SEMANTICS — ledger ทฤษฎีแบบ gated (ตาม gated demo):
 #   ledger คีย์ที่ "เทรดจริงหรือไม่" (การตัดสินใจ) ไม่ใช่ DNA signal ดิบ:
@@ -95,6 +100,8 @@ POLICY_COLS = ["สถานะ", "DNA signal", "จำนวนสั่ง (�
 
 PASS_DNA_ZERO = "PASS_DNA_ZERO"
 PASS_THRESHOLD = "PASS_THRESHOLD"
+# mirror ของ lego_one_row.PASS_SELL_EXCEEDS_REAL: มี LEAPS แล้วต้องขาย >= หุ้นจริง -> PASS ไม่ตัดเหลือ
+PASS_SELL_EXCEEDS_REAL = "PASS_SELL_EXCEEDS_REAL"
 READY_BUY = "READY_BUY"
 READY_SELL = "READY_SELL"
 
@@ -840,6 +847,9 @@ class _LedgerExplainer:
             return "PASS_DNA_ZERO — DNA signal = 0 ไม่เทรด"
         if status == PASS_THRESHOLD:
             return "PASS_THRESHOLD — signal = 1 แต่ |ส่วนต่างเป้าหมาย| ≤ DIFF ไม่ยิง order"
+        if status == PASS_SELL_EXCEEDS_REAL:
+            return ("PASS_SELL_EXCEEDS_REAL — ต้องขาย ≥ หุ้นจริง (LEAPS ขายเป็นหุ้นไม่ได้) "
+                    "ไม่ยิง order ไม่ตัดเหลือ")
         if status in (READY_BUY, READY_SELL):
             if self.semantics[i] in _EXECUTION_SEMANTICS:
                 return (f"{status} เป็นแค่ intent — cashflow_status = {cashflow} "
@@ -1065,6 +1075,92 @@ def ledger_explanations(df: pd.DataFrame, p0: float | None = None) -> list[dict[
              "Aₙ สะสม (USD)": ex.actual(i),
              "Eₙ ส่วนเกินสะสม (USD)": ex.excess(i)}
             for i in range(len(ex.src))]
+
+
+def _shares(x: float) -> str:
+    """จำนวนหุ้นแบบเดียวกับที่ช่องตารางแสดง (lego_hover_table: str(value), ไม่ปัด 2dp)"""
+    return str(float(x))
+
+
+def _leaps_split(row) -> tuple[float, float] | None:
+    """(หุ้นจริง, LEAPS) ของแถวที่ bot ใช้ LEAPS; แถวอื่น -> None"""
+    real, leaps = _meta_num(row, "real_holdings"), _meta_num(row, "leaps_shares")
+    return None if real is None or leaps is None else (real, leaps)
+
+
+def holdings_explanations(df: pd.DataFrame) -> list[dict[str, str]]:
+    """ที่มาของ "จำนวนถือครอง (หุ้น)" บนแถวที่ใช้ LEAPS แทนหุ้น (LEGO_LEAPS)
+
+    คอลัมน์ 7 ของแถวเหล่านี้ = หุ้นจริงจาก Webull + LEAPS (หุ้นจำลอง, 1 สัญญา = 100) ตามที่
+    bot เขียนไว้ ค่าแยกมาจาก field แบน ``real_holdings`` / ``leaps_shares`` (ไม่ใช่คอลัมน์ใหม่).
+    คืน list ยาวเท่าจำนวนแถว; แถวที่ไม่ใช้ LEAPS ได้ ``{}`` ตารางจึงเหมือนเดิมทุกอย่าง.
+    read-only: ไม่แก้ค่าใดในตาราง
+    """
+    if df.empty:
+        return []
+    src = df.reset_index(drop=True)
+    tips: list[dict[str, str]] = []
+    for i in range(len(src)):
+        row = src.iloc[i]
+        split = _leaps_split(row)
+        if split is None:
+            tips.append({})
+            continue
+        real, leaps = split
+        shown = _meta_num(row, HOLDINGS_COL)
+        step = row.get("DNA step", i)
+        lines = [f"{row.get('สินทรัพย์', '')} · DNA step {step} · หุ้นจริง + LEAPS",
+                 f"holdingsₙ = หุ้นจริง {_shares(real)} + LEAPS {_shares(leaps)} = "
+                 f"{_shares(shown) if shown is not None else '—'}",
+                 "หุ้นจริง = position ที่ Webull รายงาน (ไม่นับ option)",
+                 f"LEAPS = {_shares(leaps)} หุ้นจำลอง (1 สัญญา = 100 หุ้น) — นับในมูลค่าพอร์ต/ส่วนต่าง",
+                 f"SELL ได้ไม่เกินหุ้นจริง {_shares(real)} หุ้น (LEAPS ขายเป็นหุ้นไม่ได้)"]
+        changed = _meta_num(row, "leaps_shares_changed_from")
+        if changed is not None:
+            lines.append(f"LEAPS เปลี่ยนจาก {_shares(changed)} เป็น {_shares(leaps)} — ฐานใหม่มีผล"
+                         "ตั้งแต่แถวนี้ (chain เดิม, Aₙ/Eₙ ต่อเนื่อง ไม่ rebase)")
+        if str(row.get("สถานะ", "")) == PASS_SELL_EXCEEDS_REAL:
+            lines.append("แถวนี้ PASS: ต้องขาย ≥ หุ้นจริง จึงไม่ส่ง order (ไม่ตัดเหลือ)")
+        after = _meta_num(row, "post_execution_holdings")
+        real_after = _meta_num(row, "post_execution_real_holdings")
+        if after is not None and real_after is not None:
+            lines.append(f"หลัง fill: หุ้นจริง {_shares(real_after)} + LEAPS {_shares(leaps)} = "
+                         f"{_shares(after)}")
+        tips.append({HOLDINGS_COL: "\n".join(lines)})
+    return tips
+
+
+def table_tooltips(df: pd.DataFrame, p0: float | None = None
+                   ) -> tuple[list[dict[str, str]], list[str]]:
+    """tooltip ของตาราง 17 คอลัมน์และคอลัมน์ที่มี tooltip
+
+    ที่มาของ Rₙ/ΔAₙ/Aₙ/Eₙ เสมอ; คอลัมน์ 7 (หุ้นจริง + LEAPS) เพิ่มเฉพาะเมื่อมีแถวที่ใช้ LEAPS —
+    ไม่มี LEAPS เลยได้ผลเหมือน ``ledger_explanations`` + ``LEDGER_COLS`` ทุกตัวอักษร
+    """
+    tips = ledger_explanations(df, p0=p0)
+    columns = list(LEDGER_COLS)
+    extra = holdings_explanations(df)
+    if any(extra):
+        tips = [{**tip, **more} for tip, more in zip(tips, extra)]
+        columns.append(HOLDINGS_COL)
+    return tips, columns
+
+
+def leaps_summary(df: pd.DataFrame) -> dict | None:
+    """ค่าแยกหุ้นจริง/LEAPS ของแถวล่าสุด (None = แถวล่าสุดไม่ใช้ LEAPS)"""
+    if df.empty:
+        return None
+    row = df.iloc[-1]
+    split = _leaps_split(row)
+    if split is None:
+        return None
+    real, leaps = split
+    holdings = _meta_num(row, HOLDINGS_COL)
+    return {"real_holdings": real, "leaps_shares": leaps, "holdings": holdings,
+            "changes": int(df["leaps_shares_changed_from"].notna().sum())
+            if "leaps_shares_changed_from" in df.columns else 0,
+            "text": f"หุ้นจริง {_shares(real)} + LEAPS {_shares(leaps)} = "
+                    f"{_shares(holdings) if holdings is not None else '—'}"}
 
 
 # ============================================================================

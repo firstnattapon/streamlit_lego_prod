@@ -45,22 +45,25 @@ _REQUIRED_DASH_CORE_API = (
     "LEGACY_DROPPED_COLS",
     "ledger_explanations",
     "audit_with_ledger_time",
+    "HOLDINGS_COL",
+    "table_tooltips",
+    "leaps_summary",
 )
 if any(not hasattr(_lego_dash_core, name) for name in _REQUIRED_DASH_CORE_API):
     _lego_dash_core = importlib.reload(_lego_dash_core)
 
 from lego_dash_core import (DEFAULT_GATED_DNA, EXECUTION_CONFIRMED_SEMANTICS,
-                            EXECUTION_TERMINAL_FROZEN_V2, LEDGER_COLS,
+                            EXECUTION_TERMINAL_FROZEN_V2, HOLDINGS_COL,
                             MAX_REBALANCING_STEPS, MONEY_COLS,
                             audit_with_ledger_time, build_gate_actions,
                             count_ledger_corrections,
                             default_chain_index, filter_audit_rows,
                             gated_rebalancing_cashflow_from_prices,
-                            integrity_report, ledger_explanations,
+                            integrity_report, leaps_summary,
                             order_columns, pending_broker_fee_count,
                             rebalancing_cashflow_from_prices,
                             recompute_gated_ledger, rows_to_df,
-                            simulate_rebalancing_prices)
+                            simulate_rebalancing_prices, table_tooltips)
 
 FROZEN_TERMINAL_SEMANTICS = getattr(
     _lego_dash_core, "FROZEN_TERMINAL_SEMANTICS",
@@ -155,13 +158,17 @@ def render_ledger_table(show: pd.DataFrame, persisted_df: pd.DataFrame,
                       help="ปิดเพื่อใช้ตารางแบบเรียง/กรองได้ (st.dataframe) — แต่ไม่มี tooltip ที่มา")
     if hover:
         try:
-            tips = ledger_explanations(persisted_df, p0=p0_hint)
+            # LEAPS แทนหุ้น: แถวที่ bot ใช้ LEAPS ได้ tooltip ที่คอลัมน์ 7 (หุ้นจริง + LEAPS) ด้วย
+            # ไม่มี LEAPS เลยก็ได้ tooltip/คอลัมน์ชุดเดิมทุกตัวอักษร
+            tips, tip_cols = table_tooltips(persisted_df, p0=p0_hint)
             theme = getattr(getattr(st.context, "theme", None), "type", None)
             components.html(
-                build_hover_table_html(show, tips, LEDGER_COLS, MONEY_COLS, theme=theme),
+                build_hover_table_html(show, tips, tip_cols, MONEY_COLS, theme=theme),
                 height=hover_table_height(len(show)))
-            st.caption("ชี้เมาส์ (หรือกด Tab) ที่ตัวเลขคอลัมน์ Rₙ · ΔAₙ · Aₙ · Eₙ — "
-                       "tooltip แสดงสูตรพร้อมแทนค่าจริงของแถวนั้น และ P_acted/Aₙ₋₁ มาจากแถวไหน "
+            st.caption("ชี้เมาส์ (หรือกด Tab) ที่ตัวเลขคอลัมน์ Rₙ · ΔAₙ · Aₙ · Eₙ"
+                       + (" · จำนวนถือครอง (หุ้นจริง + LEAPS)" if HOLDINGS_COL in tip_cols
+                          else "")
+                       + " — tooltip แสดงสูตรพร้อมแทนค่าจริงของแถวนั้น และ P_acted/Aₙ₋₁ มาจากแถวไหน "
                        "(ตารางปัด 2 ตำแหน่ง ส่วน tooltip แสดง 4 ตำแหน่ง)")
             return
         except Exception as exc:   # tooltip เป็นส่วนเสริม — ห้ามทำให้ตารางหลักล่ม
@@ -283,6 +290,12 @@ def render_live_dashboard(paper: bool = False) -> None:
     st.line_chart(chart_df)
 
     st.subheader("ตาราง 17 คอลัมน์ (round 2dp)")
+    leaps = leaps_summary(persisted_df)
+    if leaps:
+        st.caption(
+            "LEAPS แทนหุ้น: จำนวนถือครอง = หุ้นจริง + LEAPS (หุ้นจำลอง, 1 สัญญา = 100) — "
+            f"แถวล่าสุด {leaps['text']} · SELL ได้ไม่เกินหุ้นจริง · LEAPS เปลี่ยนกลาง chain "
+            f"{leaps['changes']} ครั้ง (บันทึกที่แถวนั้นใน leaps_shares_changed_from)")
     show = order_columns(df.copy())
     for col in MONEY_COLS:
         if col in show:
