@@ -48,6 +48,7 @@ _REQUIRED_DASH_CORE_API = (
     "HOLDINGS_COL",
     "table_tooltips",
     "leaps_summary",
+    "genesis_baseline_info",
 )
 if any(not hasattr(_lego_dash_core, name) for name in _REQUIRED_DASH_CORE_API):
     _lego_dash_core = importlib.reload(_lego_dash_core)
@@ -59,6 +60,7 @@ from lego_dash_core import (DEFAULT_GATED_DNA, EXECUTION_CONFIRMED_SEMANTICS,
                             count_ledger_corrections,
                             default_chain_index, filter_audit_rows,
                             gated_rebalancing_cashflow_from_prices,
+                            genesis_baseline_info,
                             integrity_report, leaps_summary,
                             order_columns, pending_broker_fee_count,
                             rebalancing_cashflow_from_prices,
@@ -160,7 +162,8 @@ def render_ledger_table(show: pd.DataFrame, persisted_df: pd.DataFrame,
         try:
             # LEAPS แทนหุ้น: แถวที่ bot ใช้ LEAPS ได้ tooltip ที่คอลัมน์ 7 (หุ้นจริง + LEAPS) ด้วย
             # ไม่มี LEAPS เลยก็ได้ tooltip/คอลัมน์ชุดเดิมทุกตัวอักษร
-            tips, tip_cols = table_tooltips(persisted_df, p0=p0_hint)
+            # genesis_baseline=True ต้องตรงกับที่ใช้คำนวณ ``show`` (แถว n = 0 เริ่มจาก 0)
+            tips, tip_cols = table_tooltips(persisted_df, p0=p0_hint, genesis_baseline=True)
             theme = getattr(getattr(st.context, "theme", None), "type", None)
             components.html(
                 build_hover_table_html(show, tips, tip_cols, MONEY_COLS, theme=theme),
@@ -253,7 +256,21 @@ def render_live_dashboard(paper: bool = False) -> None:
                 "— ตาราง/กราฟด้านล่างถูก **คำนวณใหม่ตามหลักการแช่แข็ง** (ทุก PASS ทั้ง "
                 "PASS_DNA_ZERO และ PASS_THRESHOLD → ΔAₙ = 0, Aₙ ค้าง) ควรแก้ engine ต้นทางด้วย"
             )
-    df = df_fixed
+
+    # n = 0 เป็นจุดตั้งต้น (R₀ = ΔA₀ = A₀ = E₀ = 0): fill แรกของ chain ไม่ book slippage (quote → fill) เป็นกำไร.
+    # ส่วนนี้เป็นการ "แสดง" เท่านั้น — ไม่แก้ DB; ค่าที่ DB บันทึกยังอยู่ใน persisted_df (tooltip + Integrity check)
+    baseline = genesis_baseline_info(persisted_df, p0=p0_hint)
+    df = recompute_gated_ledger(persisted_df, p0=p0_hint, genesis_baseline=True)
+    if baseline:
+        step = baseline.get("dna_step")
+        where = "" if step is None else f" · DNA step {int(step)}"
+        st.info(
+            f"ℹ️ แถวแรกของ chain (n = 0{where}) ถูกบันทึกใน DB ด้วย "
+            f"ΔA₀ = {baseline['shift']:,.4f} — fill {baseline['p_fill']:,.4f} เทียบ quote "
+            f"{baseline['p_quote']:,.4f} ถูกนับเป็นกำไร · ตาราง/กราฟ/ตัวเลขด้านล่างแสดงแบบเริ่มจาก 0: "
+            f"ΔA₀ = FIX_C × (P₀ / P₀ − 1) = 0 และหัก {baseline['shift']:,.4f} ออกจาก Aₙ/Eₙ ของแถวถัดไป "
+            "(ไม่แก้ DB · ชี้เมาส์ที่ตัวเลขเพื่อดูค่าที่ DB บันทึก) · "
+            "Integrity check ด้านล่างยังตรวจค่าที่ DB บันทึกจริง")
 
     latest = df.iloc[-1]
     c1, c2, c3, c4 = st.columns(4)

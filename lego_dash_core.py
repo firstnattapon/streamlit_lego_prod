@@ -265,6 +265,27 @@ def _known_cashflow_flags(df: pd.DataFrame) -> list[bool]:
         *FROZEN_TERMINAL_SEMANTICS]).tolist()
 
 
+def _is_genesis_first_row(df: pd.DataFrame) -> bool:
+    """แถวแรกของ ``df`` คือแถวแรกของ chain จริง (n = 0) หรือไม่
+
+    ``version == 1`` — chain ที่เดินตามนาฬิกาตลาดเริ่มที่ DNA step = market_ordinal (เช่น 133, 1040)
+    ไม่ใช่ 0 — หรือ ``DNA step == 0`` (legacy/shadow, แถวเก่าที่ไม่มี version).
+    ตรงกับที่ integrity_report ใช้; ชุดข้อมูลที่ถูกตัดหน้า (version > 1) ไม่ใช่ genesis
+    """
+    if df.empty:
+        return False
+    first = df.iloc[0]
+    try:
+        if float(first.get("version")) == 1:
+            return True
+    except (TypeError, ValueError):
+        pass
+    try:
+        return int(first.get("DNA step")) == 0
+    except (TypeError, ValueError):
+        return False
+
+
 def _reference_context(df: pd.DataFrame, p0: float | None) -> tuple[float, float] | None:
     """หา (P₀, FIX_C) สำหรับเส้นอ้างอิง โดยไม่พึ่งสถานะการเทรดเลย"""
     required = {"ราคา Pₙ (USD)", "มูลค่าพอร์ต (USD)", "ส่วนต่างเป้าหมาย (USD)"}
@@ -272,10 +293,9 @@ def _reference_context(df: pd.DataFrame, p0: float | None) -> tuple[float, float
         return None
 
     resolved_p0 = p0
-    if resolved_p0 is None and "DNA step" in df.columns:
+    if resolved_p0 is None and _is_genesis_first_row(df):
         try:
-            if int(df["DNA step"].iloc[0]) == 0:
-                resolved_p0 = float(df["ราคา Pₙ (USD)"].iloc[0])
+            resolved_p0 = float(df["ราคา Pₙ (USD)"].iloc[0])
         except (TypeError, ValueError):
             return None
     if resolved_p0 is None:
@@ -454,7 +474,7 @@ def integrity_report(df: pd.DataFrame, p0_hint: float | None = None,
     fixc_series = v - gap
     fix_c = float(fixc_series.iloc[0])
     scale = tol * max(1.0, abs(fix_c))
-    genesis = bool(df.iloc[0].get("version") == 1 or step.iloc[0] == 0)
+    genesis = _is_genesis_first_row(df)
 
     p0 = p0_hint
     if p0 is None and genesis:
@@ -612,8 +632,138 @@ def integrity_report(df: pd.DataFrame, p0_hint: float | None = None,
     return report, bool(report["ผ่าน"].all())
 
 
+# ----------------------------------------------------------------------------
+# n = 0 เป็นจุดตั้งต้นของ ledger: R₀ = ΔA₀ = A₀ = E₀ = 0 (กฎ engine "แถวแรก: P₀ = Pₙ")
+# fill แรกของ chain มี slippage (quote → fill) — ถ้านับเป็น ΔA₀ = FIX_C × (fill / quote − 1) จะเป็น "กำไร"
+# ที่สะสมค้างใน Aₙ/Eₙ ทุกแถว. จากแถวที่ DB เก็บไว้ (และกฎ flat_first_buy ใน _frozen_v2_errors) baseline ศูนย์
+# initial_funding_zero_v1 ดูเหมือนใช้กับบัญชี holdings = 0 เท่านั้น (อนุมาน — โค้ด backend ไม่อยู่ใน repo นี้)
+# จึงมี chain (เช่น LEAPS ที่ holdings ≠ 0 ตั้งแต่แรก) ที่ DB บันทึก ΔA₀ ≠ 0 ไว้ — ส่วนนี้ทำให้ dashboard
+# "แสดง" แถว n = 0 เริ่มจาก 0 โดยไม่แก้ DB (integrity_report ยังอ่านค่าดิบเสมอ)
+# ----------------------------------------------------------------------------
+_GENESIS_SNAP = 1e-9     # |x| ≤ นี้หลังหัก shift ปัดเป็น +0.0 (กัน "-0.00" ตอน round 2dp)
+
+
+def _genesis_baseline_context(df: pd.DataFrame, p0: float | None) -> dict | None:
+    """ตรวจว่า fill แรกของ chain ถูกบันทึกเป็น ΔA₀ ≠ 0 (slippage quote → fill นับเป็นกำไร) หรือไม่
+
+    ต้องครบทุกข้อ มิฉะนั้น None (fail safe — ค่าผิดปกติปล่อยให้ integrity_report จับ ไม่ rebase เงียบ ๆ):
+    แถวแรกเป็น genesis · semantics แบบ execution (v1/v2/v3) · cashflow_status = FINALIZED ·
+    execution_price/quantity > 0 · ไม่ใช่ initial_funding (นโยบายศูนย์ใช้แล้ว) ·
+    previous_action_price = P₀ (ไม่มีฟิลด์นี้ -> ใช้ quote ของแถว genesis ซึ่งเป็น seed P_acted) ·
+    ΔA₀ ที่บันทึก ≠ 0 และ = FIX_C × (execution_price / previous_action_price − 1)
+    """
+    delta_col, actual_col, excess_col = LEDGER_COLS[1:]
+    need = {"ราคา Pₙ (USD)", "มูลค่าพอร์ต (USD)", "ส่วนต่างเป้าหมาย (USD)",
+            delta_col, actual_col, excess_col}
+    if df.empty or not need.issubset(df.columns) or not _is_genesis_first_row(df):
+        return None
+    first = df.iloc[0]
+    semantics = _semantics(df).iloc[0]
+    if semantics not in _EXECUTION_SEMANTICS:
+        return None
+    if (str(first.get("cashflow_status")) != CASHFLOW_FINALIZED
+            or _meta_flag(first, "initial_funding")):
+        return None
+
+    quote = _meta_num(first, "ราคา Pₙ (USD)")
+    fill = _meta_num(first, "execution_price")
+    qty = _meta_num(first, "execution_quantity")
+    booked = _meta_num(first, delta_col)
+    value = _meta_num(first, "มูลค่าพอร์ต (USD)")
+    gap = _meta_num(first, "ส่วนต่างเป้าหมาย (USD)")
+    if None in (quote, fill, qty, booked, value, gap) or min(quote, fill, qty) <= 0:
+        return None
+    fix_c = value - gap
+    seed = float(p0) if p0 is not None else quote
+    prev = _meta_num(first, "previous_action_price")
+    prev = quote if prev is None else prev
+    if prev <= 0 or not math.isclose(prev, seed, rel_tol=1e-9, abs_tol=1e-9):
+        return None
+    scale = 1e-6 * max(1.0, abs(fix_c))
+    if abs(booked) <= scale or abs(booked - fix_c * (fill / prev - 1.0)) > scale:
+        return None
+    frozen = semantics in FROZEN_TERMINAL_SEMANTICS
+    finalized_at = pd.to_datetime(first.get("cashflow_finalized_at"), utc=True, errors="coerce")
+    if frozen and pd.isna(finalized_at):
+        return None          # ไม่รู้ว่าแถวหลังจากนี้แถวไหนมี fill แรกรวมอยู่ใน A แล้ว -> ไม่ rebase
+    return {"shift": booked, "p_quote": quote, "p_fill": fill, "p_prev": prev, "fix_c": fix_c,
+            "dna_step": _meta_num(first, "DNA step"), "semantics": semantics,
+            "frozen": frozen, "finalized_at": finalized_at}
+
+
+def genesis_baseline_info(df: pd.DataFrame, p0: float | None = None) -> dict | None:
+    """ข้อมูลสำหรับป้ายแจ้งบนหน้า: DB บันทึก ΔA₀ = ``shift`` จาก slippage ของ fill แรก (None = ไม่มี)
+
+    ``shift`` ค่า ΔA₀ ที่ DB บันทึก · ``p_quote``/``p_fill`` ราคาตัดสินใจ/ราคา fill · ``fix_c`` ·
+    ``dna_step`` ของแถวแรก. อ่านแถวดิบของ chain เดียว (เรียง version แล้ว); read-only
+    """
+    return _genesis_baseline_context(df, p0)
+
+
+def normalize_genesis_baseline(df: pd.DataFrame, p0: float | None = None
+                               ) -> tuple[pd.DataFrame, dict | None]:
+    """ทำให้แถว n = 0 เริ่มจาก 0 สำหรับ **การแสดงผล** — คืน ``(frame, info)``
+
+    ``info`` เป็น None เมื่อไม่มี slippage ของ fill แรกที่ถูกนับเป็น ΔA₀ (คืน ``df`` ตัวเดิม ไม่แก้อะไร);
+    มีแล้ว ``info`` = ``genesis_baseline_info`` (shift = ΔA₀ ที่ DB บันทึก)
+
+    - semantics frozen terminal (v2/v3): ledger เป็นค่าที่ worker บันทึก (ห้ามคำนวณทับ) จึงคืน frame ที่หัก shift
+      ออกจากค่าที่บันทึกเท่านั้น — แถว 0: ΔA₀ = A₀ = E₀ = 0; แถวที่ A ที่บันทึกรวม fill แรกอยู่แล้ว
+      (แถว FINALIZED ทุกแถว + แถวไม่ fill ที่สังเกตตั้งแต่ ``cashflow_finalized_at`` ของ fill แรก — กฎ visibility
+      เดียวกับ ``_frozen_v2_errors``): Aₙ, Eₙ −= shift; ``E_mark_at_observation`` ของแถวที่สังเกตหลัง fill แรก −= shift;
+      ``previous_actual_cumulative`` ของ fill ลำดับ ≥ 2 −= shift. ΔA ของแถวอื่นและฟิลด์ execution ไม่เปลี่ยน
+    - ``execution_confirmed_v1``: คืน ``df`` เดิม — ``recompute_gated_ledger(genesis_baseline=True)`` คำนวณ ledger
+      จากราคาเองและไม่ book slippage; ``info`` ยังบอกว่า DB บันทึกค่าอะไรไว้
+
+    read-only: ไม่แก้ ``df`` ที่รับมา (``integrity_report`` ต้องอ่านแถวดิบเสมอ) และ idempotent
+    """
+    info = _genesis_baseline_context(df, p0)
+    if info is None or not info["frozen"]:
+        return df, info
+
+    delta_col, actual_col, excess_col = LEDGER_COLS[1:]
+    shift = info["shift"]
+    out = df.copy()
+    n = len(out)
+    frozen = _semantics(out).isin(FROZEN_TERMINAL_SEMANTICS)
+    status = (out["cashflow_status"].fillna("").astype(str) if "cashflow_status" in out.columns
+              else pd.Series([""] * n, index=out.index))
+    finalized = status.eq(CASHFLOW_FINALIZED)
+    time_col = COLUMN_ORDER[0]
+    if time_col in out.columns:
+        observed = pd.to_datetime(out[time_col], utc=True, errors="coerce")
+        visible = observed.ge(info["finalized_at"]).fillna(False).astype(bool)
+    else:
+        visible = pd.Series([False] * n, index=out.index)
+
+    # A/E ที่บันทึกรวม fill แรกอยู่แล้ว: แถว fill เอง (แถว 0), fill ถัด ๆ ไป และแถวไม่ fill ที่เห็น fill แรกแล้ว
+    ledger_has_fill = frozen & (finalized | visible)
+    ledger_has_fill.iloc[0] = True
+    mark_has_fill = frozen & visible                  # E_mark คิดตอนสังเกต: แถว 0 สังเกตก่อน fill finalize
+    prev_has_fill = frozen & finalized
+    prev_has_fill.iloc[0] = False                     # ก่อน fill แรก A = 0 ไม่รวม slip
+
+    def moved(col: str, mask: pd.Series) -> pd.Series:
+        values = pd.to_numeric(out[col], errors="coerce").astype(float)
+        new = values - shift
+        new = new.where(new.abs() > _GENESIS_SNAP, 0.0)
+        return values.where(~mask | values.isna(), new)
+
+    out[actual_col] = moved(actual_col, ledger_has_fill)
+    out[excess_col] = moved(excess_col, ledger_has_fill)
+    delta = pd.to_numeric(out[delta_col], errors="coerce").astype(float)
+    delta.iloc[0] = 0.0                               # n = 0: P_fill := P₀ -> FIX_C × (P₀/P₀ − 1) = 0
+    out[delta_col] = delta
+    for col, mask in (("E_mark_at_observation", mark_has_fill),
+                      ("previous_actual_cumulative", prev_has_fill)):
+        if col in out.columns:
+            out[col] = moved(col, mask)
+    return out, info
+
+
 def recompute_gated_ledger(df: pd.DataFrame, p0: float | None = None,
-                           trace: list | None = None) -> pd.DataFrame:
+                           trace: list | None = None, *,
+                           genesis_baseline: bool = False) -> pd.DataFrame:
     """คำนวณ recurrence ใหม่ตาม semantics ของแถว โดยไม่แก้ decision evidence.
 
     ``gated_theoretical_v2`` ใช้ decision price เมื่อ READY_* เป็น act ตามสัญญาเดิม.
@@ -624,6 +774,11 @@ def recompute_gated_ledger(df: pd.DataFrame, p0: float | None = None,
 
     ``trace`` (ไม่บังคับ): list ที่ถูกเติมทีละแถว (1 dict/แถว) ว่าแถวนั้นเดินสูตรไหนด้วยค่าอะไร
     — ใช้อธิบายที่มาของตัวเลขตอนชี้เมาส์ (``ledger_explanations``) ไม่มีผลต่อค่าที่คืน
+
+    ``genesis_baseline`` (ค่าเริ่มต้น False = พฤติกรรมเดิมทุกประการ ใช้ตรวจสัญญา/integrity): True = โหมด **แสดงผล**
+    ที่แถว n = 0 เริ่มจาก 0 — fill แรกของ chain ไม่ book slippage (quote → fill) เป็น ΔA₀ (P_fill := P₀)
+    และ P_acted ถัดไปเป็นราคา fill; แถว frozen v2/v3 ที่ DB นับ slippage ไว้ถูกหักออกด้วย
+    ``normalize_genesis_baseline``
     """
     def note(**fields) -> None:
         if trace is not None:
@@ -634,14 +789,15 @@ def recompute_gated_ledger(df: pd.DataFrame, p0: float | None = None,
         # คืน copy เสมอ: dashboard เป็น read-only จึงห้ามเขียนทับ frame ของผู้เรียก
         return _apply_reference_column(df.copy(), df, p0)
 
+    if genesis_baseline:
+        df, _ = normalize_genesis_baseline(df, p0=p0)
     source = df.reset_index(drop=True)
     out = source.copy()
     frozen_v2 = _semantics(source).isin(FROZEN_TERMINAL_SEMANTICS)
     p = out["ราคา Pₙ (USD)"].astype(float)
     fix_c = float((out["มูลค่าพอร์ต (USD)"].astype(float)
                    - out["ส่วนต่างเป้าหมาย (USD)"].astype(float)).iloc[0])
-    step = out["DNA step"].astype(int)
-    genesis = bool(step.iloc[0] == 0)
+    genesis = _is_genesis_first_row(source)
     if p0 is None and genesis:
         p0 = float(p.iloc[0])                          # แถว genesis: P₀ = ราคาแถวแรก
     can_ref = p0 is not None and p0 > 0
@@ -678,9 +834,10 @@ def recompute_gated_ledger(df: pd.DataFrame, p0: float | None = None,
                 acted_idx = 0
                 if execution[i] and execution_acted[i]:
                     action_price = float(execution_prices.iloc[i])
-                    d = fix_c * (action_price / acted - 1.0)
+                    # n = 0 เป็นจุดตั้งต้น: โหมดแสดงผลไม่ book slippage (quote → fill) เป็นกำไร (P_fill := P₀)
+                    d = 0.0 if genesis_baseline else fix_c * (action_price / acted - 1.0)
                     note(kind="genesis_fill", p_fill=action_price, acted_before=acted,
-                         acted_idx_before=0, A_prev=0.0)
+                         acted_idx_before=0, A_prev=0.0, p_quote=Pi)
                     A_prev += d
                     dA[i], A[i], E[i] = d, A_prev, A_prev - R[i]
                     acted = action_price
@@ -802,12 +959,20 @@ def _meta_flag(row, key: str) -> bool:
 
 
 class _LedgerExplainer:
-    def __init__(self, df: pd.DataFrame, p0: float | None):
-        self.src = df.reset_index(drop=True)
+    def __init__(self, df: pd.DataFrame, p0: float | None, genesis_baseline: bool = False):
+        self.raw = df.reset_index(drop=True)             # ค่าที่ DB บันทึก (ไว้บอกว่าตัดอะไรออก)
+        self.genesis_baseline = genesis_baseline
+        self.baseline: dict | None = None                # info ของ rebase (None = DB ไม่ได้นับ slippage แถวแรก)
+        src = self.raw
+        if genesis_baseline:
+            src, self.baseline = normalize_genesis_baseline(self.raw, p0=p0)
+        self.src = src.reset_index(drop=True)
         self.trace: list[dict] = []
         self.fixed = recompute_gated_ledger(
-            self.src, p0=p0, trace=self.trace).reset_index(drop=True)
+            self.src, p0=p0, trace=self.trace,
+            genesis_baseline=genesis_baseline).reset_index(drop=True)
         self.traced = len(self.trace) == len(self.src)
+        self.is_genesis = _is_genesis_first_row(self.src)
         self.ctx = _reference_context(self.src, p0)       # (P₀, FIX_C) | None
         self.known = _known_cashflow_flags(self.src)
         self.semantics = _semantics(self.src).tolist()
@@ -889,8 +1054,92 @@ class _LedgerExplainer:
             "Pₙ คือ quote ของแถวนี้ — Rₙ ขยับทุกแถวแม้ไม่ได้เทรด",
         ])
 
+    # ---- n = 0 ของโหมดแสดงผล (genesis_baseline) -----------------------------
+    def _genesis_display(self, i: int) -> bool:
+        """แถว n = 0 ที่ตารางแสดงเป็นศูนย์จริง: ใช้ข้อความ genesis พร้อมสูตรแทนค่า P₀ / P₀
+        (ถ้าค่าที่แสดงไม่ใช่ศูนย์ เช่น ΔA₀ ที่อธิบายไม่ได้ ใช้ข้อความเดิมของค่าที่บันทึก ไม่อ้างว่าเป็น 0)"""
+        if not (self.genesis_baseline and i == 0 and self.is_genesis and self.traced
+                and self.fix_c is not None and self.known[0]):
+            return False
+        try:
+            return all(abs(self._val(0, col)) <= _GENESIS_SNAP for col in LEDGER_COLS[1:3])
+        except KeyError:
+            return False
+
+    def _fill_lines(self, row, quote: float) -> list[str]:
+        """fill แรกของ chain (ถ้ามี): ไม่นับ slippage เป็นกำไร และ P_acted ถัดไปคือราคา fill"""
+        fill = _meta_num(row, "execution_price")
+        if not (self.semantics[0] in _EXECUTION_SEMANTICS
+                and str(row.get("cashflow_status")) == CASHFLOW_FINALIZED
+                and fill is not None and fill > 0):
+            return []
+        lines = []
+        if _meta_flag(row, "initial_funding"):
+            lines.append(f"policy {FUNDING_BASELINE_POLICY}: ซื้อครั้งแรกเป็นเงินตั้งต้น ไม่ใช่กำไร/ขาดทุน")
+        lines.append(f"fill จริง {_f(fill)} (slippage {fill - quote:+,.4f} จาก quote) เป็นเงินตั้งต้น "
+                     f"ไม่นับเป็นกำไร/ขาดทุน · P_acted ของ act ถัดไป = {_f(fill)}")
+        return lines
+
+    def _genesis_text(self, i: int, which: str) -> str:
+        """แถว n = 0: P_fill = P_acted = P₀ จึง ΔA₀ = FIX_C × (P₀/P₀ − 1) = 0 และ Aₙ เริ่มสะสมจากศูนย์"""
+        symbol, col = {"delta": ("ΔAₙ", "ΔAₙ ต่อสเต็ป (USD)"),
+                       "actual": ("Aₙ", "Aₙ สะสม (USD)"),
+                       "excess": ("Eₙ", "Eₙ ส่วนเกินสะสม (USD)")}[which]
+        row = self.src.iloc[i]
+        quote = float(row["ราคา Pₙ (USD)"])
+        value = self._val(i, col)
+        delta = self._val(i, "ΔAₙ ต่อสเต็ป (USD)")
+        formula = f"{_f(self.fix_c)} × ({_f(quote)} / {_f(quote)} − 1)"
+        lines = [self._title(i, symbol, "genesis — จุดเริ่มต้นของ chain (n = 0)")]
+        if which == "delta":
+            lines += ["ΔAₙ = FIX_C × (P_fill / P_acted − 1)", f"    = {formula}", f"    = {_f(value)}",
+                      f"P_fill = P_acted = P₀ = {_f(quote)} (quote ของแถว genesis — ยังไม่มีราคา act ก่อนหน้า)",
+                      *self._fill_lines(row, quote)]
+            if self.baseline is not None:
+                b = self.baseline
+                lines.append(f"ที่มาของค่าที่ DB บันทึก: {_f(b['fix_c'])} × ({_f(b['p_fill'])} / "
+                             f"{_f(b['p_prev'])} − 1) = {_f(b['shift'])} (นับ slippage เป็นกำไร)")
+        elif which == "actual":
+            lines += ["Aₙ = 0 — เริ่มนับสะสมจากศูนย์", "Aₙ = Aₙ₋₁ + ΔAₙ",
+                      f"   = {_f(0.0)} + {formula}", f"   = {_f(0.0)} + {_op(delta)}", f"   = {_f(value)}"]
+        else:
+            A, R = self._val(i, "Aₙ สะสม (USD)"), self._val(i, "Rₙ อ้างอิง (USD)")
+            if abs(value) <= _GENESIS_SNAP:
+                lines.append("Eₙ = 0 — ยังไม่มีส่วนเกิน (Aₙ = 0)")
+            if abs((A - R) - value) <= 1e-9:
+                lines += ["Eₙ = Aₙ − Rₙ", f"   = {_f(A)} − {_op(R)}", f"   = {_f(value)}"]
+            else:
+                lines.append(f"Eₙ = {_f(value)}")
+        return "\n".join(lines)
+
+    def _rebase_note(self, i: int, col: str) -> str:
+        """บรรทัดท้าย tooltip เมื่อค่าที่แสดงต่างจากที่ DB บันทึกเพราะตัด slippage ของ fill แรก"""
+        if (self.baseline is None or col not in self.raw.columns
+                or col not in self.fixed.columns):
+            return ""
+        raw, shown, shift = _meta_num(self.raw.iloc[i], col), self._val(i, col), self.baseline["shift"]
+        if raw is None or abs((raw - shown) - shift) > 1e-6 * max(1.0, abs(self.baseline["fix_c"])):
+            return ""
+        return (f"\nค่าที่ DB บันทึก {_f(raw)} − slippage ของ fill แรกที่ตัดออก {_f(shift)} "
+                f"= {_f(shown)} (rebase n = 0)")
+
     # ---- ΔAₙ / Aₙ / Eₙ ----------------------------------------------------
     def delta(self, i: int) -> str:
+        col = "ΔAₙ ต่อสเต็ป (USD)"
+        text = self._genesis_text(i, "delta") if self._genesis_display(i) else self._delta(i)
+        return text + self._rebase_note(i, col) if text else text
+
+    def actual(self, i: int) -> str:
+        col = "Aₙ สะสม (USD)"
+        text = self._genesis_text(i, "actual") if self._genesis_display(i) else self._actual(i)
+        return text + self._rebase_note(i, col) if text else text
+
+    def excess(self, i: int) -> str:
+        col = "Eₙ ส่วนเกินสะสม (USD)"
+        text = self._genesis_text(i, "excess") if self._genesis_display(i) else self._excess(i)
+        return text + self._rebase_note(i, col) if text else text
+
+    def _delta(self, i: int) -> str:
         col = "ΔAₙ ต่อสเต็ป (USD)"
         if col not in self.fixed.columns:
             return ""
@@ -935,7 +1184,7 @@ class _LedgerExplainer:
         return self._stored(i, "ΔAₙ", col, f"semantics {self.semantics[i]!r} เก่า/ไม่รู้จัก "
                             "— dashboard ไม่เดาสูตรใหม่ให้")
 
-    def actual(self, i: int) -> str:
+    def _actual(self, i: int) -> str:
         col = "Aₙ สะสม (USD)"
         if col not in self.fixed.columns:
             return ""
@@ -968,7 +1217,7 @@ class _LedgerExplainer:
         return self._stored(i, "Aₙ", col, f"semantics {self.semantics[i]!r} เก่า/ไม่รู้จัก "
                             "— dashboard ไม่เดาสูตรใหม่ให้")
 
-    def excess(self, i: int) -> str:
+    def _excess(self, i: int) -> str:
         col = "Eₙ ส่วนเกินสะสม (USD)"
         if col not in self.fixed.columns:
             return ""
@@ -1060,16 +1309,20 @@ class _LedgerExplainer:
         return "\n".join([title, f"{symbol} = {_f(value)}", keep])
 
 
-def ledger_explanations(df: pd.DataFrame, p0: float | None = None) -> list[dict[str, str]]:
+def ledger_explanations(df: pd.DataFrame, p0: float | None = None, *,
+                        genesis_baseline: bool = False) -> list[dict[str, str]]:
     """ที่มาของตัวเลข Rₙ / ΔAₙ / Aₙ / Eₙ ของทุกแถว (ลำดับตรงกับ ``recompute_gated_ledger``)
 
     คืน list ยาวเท่าจำนวนแถว แต่ละช่อง = ``{ชื่อคอลัมน์ ledger: ข้อความหลายบรรทัด}``
     บรรทัดแรกเป็นหัวข้อ ที่เหลือคือสูตรพร้อมแทนค่าจริงของแถวนั้น. read-only:
     เรียก ``recompute_gated_ledger`` ด้วย ``trace`` แล้วเล่าเฉพาะสิ่งที่มันทำ
+
+    ``genesis_baseline`` ต้องตรงกับที่ใช้คำนวณตารางที่แสดง (ดู ``recompute_gated_ledger``): True = แถว n = 0
+    แสดงสูตร FIX_C × (P₀ / P₀ − 1) = 0 และบอกค่าที่ DB บันทึกเมื่อถูกตัด slippage ของ fill แรกออก
     """
     if df.empty:
         return []
-    ex = _LedgerExplainer(df, p0)
+    ex = _LedgerExplainer(df, p0, genesis_baseline=genesis_baseline)
     return [{"Rₙ อ้างอิง (USD)": ex.reference(i),
              "ΔAₙ ต่อสเต็ป (USD)": ex.delta(i),
              "Aₙ สะสม (USD)": ex.actual(i),
@@ -1130,14 +1383,15 @@ def holdings_explanations(df: pd.DataFrame) -> list[dict[str, str]]:
     return tips
 
 
-def table_tooltips(df: pd.DataFrame, p0: float | None = None
+def table_tooltips(df: pd.DataFrame, p0: float | None = None, *,
+                   genesis_baseline: bool = False
                    ) -> tuple[list[dict[str, str]], list[str]]:
     """tooltip ของตาราง 17 คอลัมน์และคอลัมน์ที่มี tooltip
 
     ที่มาของ Rₙ/ΔAₙ/Aₙ/Eₙ เสมอ; คอลัมน์ 7 (หุ้นจริง + LEAPS) เพิ่มเฉพาะเมื่อมีแถวที่ใช้ LEAPS —
     ไม่มี LEAPS เลยได้ผลเหมือน ``ledger_explanations`` + ``LEDGER_COLS`` ทุกตัวอักษร
     """
-    tips = ledger_explanations(df, p0=p0)
+    tips = ledger_explanations(df, p0=p0, genesis_baseline=genesis_baseline)
     columns = list(LEDGER_COLS)
     extra = holdings_explanations(df)
     if any(extra):
