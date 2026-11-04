@@ -1,16 +1,16 @@
 """lego_dash_core.py — pure logic ของ dashboard (ไม่มี streamlit/firebase I/O)
 
 แยกจาก streamlit_app.py เพื่อให้ test ได้ตรง ๆ:
-  - rows_to_df       : RTDB dict -> DataFrame เฉพาะ committed==True เรียง version (fail closed)
-  - order_columns    : บังคับลำดับสัญญา 17 คอลัมน์ (RTDB ไม่การันตีลำดับ key) + meta ต่อท้าย
-  - integrity_report : ตรวจสมการ LEGO ต่อแถวจากค่า full precision (E1–E8)
-  - recompute_gated_ledger : derive recurrence ใหม่ตามหลักการแช่แข็ง ก่อนแสดงผลเสมอ
+- rows_to_df       : RTDB dict -> DataFrame เฉพาะ committed==True เรียง version (fail closed)
+- order_columns    : บังคับลำดับสัญญา 17 คอลัมน์ (RTDB ไม่การันตีลำดับ key) + meta ต่อท้าย
+- integrity_report : ตรวจสมการ LEGO ต่อแถวจากค่า full precision (E1–E8)
+- recompute_gated_ledger : derive recurrence ใหม่ตามหลักการแช่แข็ง ก่อนแสดงผลเสมอ
 
 รองรับ cashflow contract ตาม ``semantics`` ของแต่ละแถว:
-  - gated_theoretical_v2: act จาก decision READY_* + signal/quantity ตาม historical contract
-  - execution_confirmed_v1: act เฉพาะ broker-confirmed fill ที่มี execution qty/price > 0
-  - ทุกกรณีอื่นแช่แข็ง: ΔAₙ = 0, Aₙ ค้าง, P_acted ค้าง
-  - ไม่แช่แข็ง Rₙ เด็ดขาด — Rₙ = FIX_C × ln(Pₙ/P₀) จาก quote Pₙ ทุกแถว
+- gated_theoretical_v2: act จาก decision READY_* + signal/quantity ตาม historical contract
+- execution_confirmed_v1: act เฉพาะ broker-confirmed fill ที่มี execution qty/price > 0
+- ทุกกรณีอื่นแช่แข็ง: ΔAₙ = 0, Aₙ ค้าง, P_acted ค้าง
+- ไม่แช่แข็ง Rₙ เด็ดขาด — Rₙ = FIX_C × ln(Pₙ/P₀) จาก quote Pₙ ทุกแถว
 """
 from __future__ import annotations
 
@@ -303,7 +303,7 @@ def _reference_context(df: pd.DataFrame, p0: float | None) -> tuple[float, float
 
     resolved_p0 = float(resolved_p0)
     fix_c = float(df["มูลค่าพอร์ต (USD)"].astype(float).iloc[0]
-                  - df["ส่วนต่างเป้าหมาย (USD)"].astype(float).iloc[0])
+- df["ส่วนต่างเป้าหมาย (USD)"].astype(float).iloc[0])
     if not np.isfinite(resolved_p0) or resolved_p0 <= 0:
         return None
     if not np.isfinite(fix_c):
@@ -459,6 +459,10 @@ def integrity_report(df: pd.DataFrame, p0_hint: float | None = None,
                          ไม่มี -> step +1 แบบเดิม), version +1 ทุกแถว, signal ∈ {0,1}
       E8  decision:      signal=1 + READY + qty>0 เท่านั้นที่เทรด; ทุกกรณีอื่นแช่แข็ง
     """
+    # [FIX] บังคับรีเซ็ต Index ให้เป็น 0..N-1 เสมอ เพื่อป้องกัน pandas.errors.IndexingError
+    if df is not None and not df.empty:
+        df = df.reset_index(drop=True)
+
     p = df["ราคา Pₙ (USD)"].astype(float)
     h = df["จำนวนถือครอง (หุ้น)"].astype(float)
     v = df["มูลค่าพอร์ต (USD)"].astype(float)
@@ -517,7 +521,8 @@ def integrity_report(df: pd.DataFrame, p0_hint: float | None = None,
     expected_dA = expected["ΔAₙ ต่อสเต็ป (USD)"].astype(float)
     expected_E = expected["Eₙ ส่วนเกินสะสม (USD)"].astype(float)
 
-    resid4 = (dA - expected_dA).abs()[known]
+    # [FIX] ป้องกัน IndexingError โดยแปลง known mask เป็น numpy array
+    resid4 = (dA - expected_dA).abs()[np.asarray(known, dtype=bool)]
     r4 = _max_abs(resid4) if bool(known.any()) else None
 
     # Provenance fence: FINALIZED ที่ขาด fill qty/price และ fill fields บนสถานะ
@@ -580,7 +585,7 @@ def integrity_report(df: pd.DataFrame, p0_hint: float | None = None,
     else:
         add("E5", "Aₙ = Aₙ₋₁ + ΔAₙ", None, True, "แถวเดียว — ไม่มีคู่เทียบ")
 
-    resid6 = (E - expected_E).abs()[known]
+    resid6 = (E - expected_E).abs()[np.asarray(known, dtype=bool)]
     r6 = _max_abs(resid6) if bool(known.any()) else 0.0
     notes6 = []
     if legacy_count:
@@ -707,12 +712,12 @@ def normalize_genesis_baseline(df: pd.DataFrame, p0: float | None = None
     ``info`` เป็น None เมื่อไม่มี slippage ของ fill แรกที่ถูกนับเป็น ΔA₀ (คืน ``df`` ตัวเดิม ไม่แก้อะไร);
     มีแล้ว ``info`` = ``genesis_baseline_info`` (shift = ΔA₀ ที่ DB บันทึก)
 
-    - semantics frozen terminal (v2/v3): ledger เป็นค่าที่ worker บันทึก (ห้ามคำนวณทับ) จึงคืน frame ที่หัก shift
+- semantics frozen terminal (v2/v3): ledger เป็นค่าที่ worker บันทึก (ห้ามคำนวณทับ) จึงคืน frame ที่หัก shift
       ออกจากค่าที่บันทึกเท่านั้น — แถว 0: ΔA₀ = A₀ = E₀ = 0; แถวที่ A ที่บันทึกรวม fill แรกอยู่แล้ว
       (แถว FINALIZED ทุกแถว + แถวไม่ fill ที่สังเกตตั้งแต่ ``cashflow_finalized_at`` ของ fill แรก — กฎ visibility
       เดียวกับ ``_frozen_v2_errors``): Aₙ, Eₙ −= shift; ``E_mark_at_observation`` ของแถวที่สังเกตหลัง fill แรก −= shift;
       ``previous_actual_cumulative`` ของ fill ลำดับ ≥ 2 −= shift. ΔA ของแถวอื่นและฟิลด์ execution ไม่เปลี่ยน
-    - ``execution_confirmed_v1``: คืน ``df`` เดิม — ``recompute_gated_ledger(genesis_baseline=True)`` คำนวณ ledger
+- ``execution_confirmed_v1``: คืน ``df`` เดิม — ``recompute_gated_ledger(genesis_baseline=True)`` คำนวณ ledger
       จากราคาเองและไม่ book slippage; ``info`` ยังบอกว่า DB บันทึกค่าอะไรไว้
 
     read-only: ไม่แก้ ``df`` ที่รับมา (``integrity_report`` ต้องอ่านแถวดิบเสมอ) และ idempotent
@@ -796,7 +801,7 @@ def recompute_gated_ledger(df: pd.DataFrame, p0: float | None = None,
     frozen_v2 = _semantics(source).isin(FROZEN_TERMINAL_SEMANTICS)
     p = out["ราคา Pₙ (USD)"].astype(float)
     fix_c = float((out["มูลค่าพอร์ต (USD)"].astype(float)
-                   - out["ส่วนต่างเป้าหมาย (USD)"].astype(float)).iloc[0])
+- out["ส่วนต่างเป้าหมาย (USD)"].astype(float)).iloc[0])
     genesis = _is_genesis_first_row(source)
     if p0 is None and genesis:
         p0 = float(p.iloc[0])                          # แถว genesis: P₀ = ราคาแถวแรก
@@ -981,7 +986,7 @@ class _LedgerExplainer:
                         else "ราคา Pₙ ของแถว genesis")
         has_basis = {"มูลค่าพอร์ต (USD)", "ส่วนต่างเป้าหมาย (USD)"}.issubset(self.src.columns)
         self.fix_c = (float(self.src["มูลค่าพอร์ต (USD)"].astype(float).iloc[0]
-                            - self.src["ส่วนต่างเป้าหมาย (USD)"].astype(float).iloc[0])
+- self.src["ส่วนต่างเป้าหมาย (USD)"].astype(float).iloc[0])
                       if has_basis and len(self.src) else None)
 
     # ---- helpers -----------------------------------------------------------
@@ -1504,7 +1509,7 @@ def gated_rebalancing_cashflow_from_prices(prices: Iterable[float], fix_c: float
       pass (0): ``ΔAᵢ = 0``, ``Aᵢ`` ค้าง, ``P_acted`` แช่แข็ง และ
                 ``Eᵢ = Aᵢ − Fix_c × ln(P_acted/P₀)`` (smooth — ค้างค่า act ล่าสุด)
 
-    เหตุผลเศรษฐศาสตร์: ช่วง pass ไม่มีการ rebalance — holdings แช่แข็งตั้งแต่
+    เหตุผลเศรษฐศาสตร์: ช่วง pass ไม่มีมูลค่า rebalance — holdings แช่แข็งตั้งแต่
     act ล่าสุด กำไรจริงจึงเป็นก้อนเดียวเทียบราคาแช่แข็งตอน act ใหม่
     คุณสมบัติ: ``Eₙ`` ไม่ลด และ ≥ 0 เสมอ (จาก ``x − 1 ≥ ln x`` ต่อ segment)
     """
