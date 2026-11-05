@@ -712,13 +712,13 @@ def normalize_genesis_baseline(df: pd.DataFrame, p0: float | None = None
     ``info`` เป็น None เมื่อไม่มี slippage ของ fill แรกที่ถูกนับเป็น ΔA₀ (คืน ``df`` ตัวเดิม ไม่แก้อะไร);
     มีแล้ว ``info`` = ``genesis_baseline_info`` (shift = ΔA₀ ที่ DB บันทึก)
 
-- semantics frozen terminal (v2/v3): ledger เป็นค่าที่ worker บันทึก (ห้ามคำนวณทับ) จึงคืน frame ที่หัก shift
-      ออกจากค่าที่บันทึกเท่านั้น — แถว 0: ΔA₀ = A₀ = E₀ = 0; แถวที่ A ที่บันทึกรวม fill แรกอยู่แล้ว
-      (แถว FINALIZED ทุกแถว + แถวไม่ fill ที่สังเกตตั้งแต่ ``cashflow_finalized_at`` ของ fill แรก — กฎ visibility
-      เดียวกับ ``_frozen_v2_errors``): Aₙ, Eₙ −= shift; ``E_mark_at_observation`` ของแถวที่สังเกตหลัง fill แรก −= shift;
-      ``previous_actual_cumulative`` ของ fill ลำดับ ≥ 2 −= shift. ΔA ของแถวอื่นและฟิลด์ execution ไม่เปลี่ยน
+- semantics frozen terminal (v2/v3): แถว 0 มี ΔA₀ = A₀ = E₀ = 0 และราคาตั้งต้น P_acted = P₀;
+      แถวไม่ fill ก่อน fill ที่ 2 จะ finalize หัก shift ออกจาก Aₙ, Eₙ และ E_mark_at_observation;
+      เมื่อมี fill ลำดับที่ 2 (act แรกหลัง genesis) previous_action_price ต้องเป็น P₀ (ไม่ใช่ราคา fill แรก)
+      และ previous_actual_cumulative = 0 จึงคำนวณ ΔA ของ fill ที่ 2 จาก P₀ แล้วปรับ Aₙ, Eₙ,
+      E_mark_at_observation และ previous_actual_cumulative ของแถวถัดไปตามผลรวมสะสมจริง
 - ``execution_confirmed_v1``: คืน ``df`` เดิม — ``recompute_gated_ledger(genesis_baseline=True)`` คำนวณ ledger
-      จากราคาเองและไม่ book slippage; ``info`` ยังบอกว่า DB บันทึกค่าอะไรไว้
+      จากราคาเองโดยไม่ book slippage ที่ n = 0 และคง P_acted = P₀ สำหรับ act ถัดไป
 
     read-only: ไม่แก้ ``df`` ที่รับมา (``integrity_report`` ต้องอ่านแถวดิบเสมอ) และ idempotent
     """
@@ -728,6 +728,10 @@ def normalize_genesis_baseline(df: pd.DataFrame, p0: float | None = None
 
     delta_col, actual_col, excess_col = LEDGER_COLS[1:]
     shift = info["shift"]
+    fix_c = info["fix_c"]
+    p_prev = info["p_prev"]
+    p_fill0 = info["p_fill"]
+    scale = 1e-6 * max(1.0, abs(fix_c))
     out = df.copy()
     n = len(out)
     frozen = _semantics(out).isin(FROZEN_TERMINAL_SEMANTICS)
@@ -739,30 +743,74 @@ def normalize_genesis_baseline(df: pd.DataFrame, p0: float | None = None
         observed = pd.to_datetime(out[time_col], utc=True, errors="coerce")
         visible = observed.ge(info["finalized_at"]).fillna(False).astype(bool)
     else:
+        observed = pd.Series([pd.NaT] * n, index=out.index)
         visible = pd.Series([False] * n, index=out.index)
 
-    # A/E ที่บันทึกรวม fill แรกอยู่แล้ว: แถว fill เอง (แถว 0), fill ถัด ๆ ไป และแถวไม่ fill ที่เห็น fill แรกแล้ว
+    # ตรวจหา fill ลำดับที่ 2 (act แรกหลัง genesis) ที่ DB บันทึก previous_action_price = ราคา fill แรก
+    later_fills = [i for i in range(1, n) if bool(frozen.iloc[i] and finalized.iloc[i])]
+    idx2: int | None = None
+    delta2_new: float | None = None
+    shift2 = shift
+    visible2 = pd.Series([False] * n, index=out.index)
+    if later_fills:
+        cand = later_fills[0]
+        fill2 = _meta_num(out.iloc[cand], "execution_price")
+        prev2 = _meta_num(out.iloc[cand], "previous_action_price")
+        booked2 = _meta_num(out.iloc[cand], delta_col)
+        prev2_eff = p_fill0 if prev2 is None else prev2
+        if (fill2 is not None and fill2 > 0 and booked2 is not None
+                and math.isclose(prev2_eff, p_fill0, rel_tol=1e-9, abs_tol=1e-9)
+                and abs(booked2 - fix_c * (fill2 / prev2_eff - 1.0)) <= scale):
+            idx2 = cand
+            delta2_new = fix_c * (fill2 / p_prev - 1.0)
+            # DB สะสม (shift + booked2) แต่เมื่อเริ่มจาก P₀ สะสมจริงคือ (0 + delta2_new)
+            shift2 = (shift + booked2) - delta2_new
+            fin2_at = pd.to_datetime(out.iloc[idx2].get("cashflow_finalized_at"), utc=True, errors="coerce")
+            if pd.notna(fin2_at) and time_col in out.columns:
+                visible2 = observed.ge(fin2_at).fillna(False).astype(bool)
+            else:
+                visible2 = pd.Series([i > idx2 for i in range(n)], index=out.index, dtype=bool)
+
     ledger_has_fill = frozen & (finalized | visible)
     ledger_has_fill.iloc[0] = True
     mark_has_fill = frozen & visible                  # E_mark คิดตอนสังเกต: แถว 0 สังเกตก่อน fill finalize
     prev_has_fill = frozen & finalized
     prev_has_fill.iloc[0] = False                     # ก่อน fill แรก A = 0 ไม่รวม slip
 
-    def moved(col: str, mask: pd.Series) -> pd.Series:
-        values = pd.to_numeric(out[col], errors="coerce").astype(float)
-        new = values - shift
-        new = new.where(new.abs() > _GENESIS_SNAP, 0.0)
-        return values.where(~mask | values.isna(), new)
+    if idx2 is not None:
+        after_fill2 = pd.Series([i >= idx2 for i in range(n)], index=out.index, dtype=bool)
+        strictly_after_fill2 = pd.Series([i > idx2 for i in range(n)], index=out.index, dtype=bool)
+        ledger_has_fill2 = frozen & ((finalized & after_fill2) | (~finalized & visible2))
+        mark_has_fill2 = frozen & visible2            # แถว idx2 สังเกตก่อน fill ของตัวเอง finalize จึงยังเห็นแค่ fill แรก
+        prev_has_fill2 = frozen & finalized & strictly_after_fill2
+    else:
+        ledger_has_fill2 = pd.Series([False] * n, index=out.index, dtype=bool)
+        mark_has_fill2 = pd.Series([False] * n, index=out.index, dtype=bool)
+        prev_has_fill2 = pd.Series([False] * n, index=out.index, dtype=bool)
 
-    out[actual_col] = moved(actual_col, ledger_has_fill)
-    out[excess_col] = moved(excess_col, ledger_has_fill)
+    def moved(col: str, mask1: pd.Series, mask2: pd.Series) -> pd.Series:
+        values = pd.to_numeric(out[col], errors="coerce").astype(float)
+        applied_shift = pd.Series(np.where(mask2, shift2, shift), index=out.index, dtype=float)
+        new = values - applied_shift
+        new = new.where(new.abs() > _GENESIS_SNAP, 0.0)
+        active = mask1 | mask2
+        return values.where(~active | values.isna(), new)
+
+    out[actual_col] = moved(actual_col, ledger_has_fill, ledger_has_fill2)
+    out[excess_col] = moved(excess_col, ledger_has_fill, ledger_has_fill2)
     delta = pd.to_numeric(out[delta_col], errors="coerce").astype(float)
     delta.iloc[0] = 0.0                               # n = 0: P_fill := P₀ -> FIX_C × (P₀/P₀ − 1) = 0
+    if idx2 is not None and delta2_new is not None:
+        delta.iloc[idx2] = 0.0 if abs(delta2_new) <= _GENESIS_SNAP else delta2_new
+        if "previous_action_price" in out.columns:
+            prev_col = pd.to_numeric(out["previous_action_price"], errors="coerce").astype(float)
+            prev_col.iloc[idx2] = p_prev
+            out["previous_action_price"] = prev_col
     out[delta_col] = delta
-    for col, mask in (("E_mark_at_observation", mark_has_fill),
-                      ("previous_actual_cumulative", prev_has_fill)):
+    for col, m1, m2 in (("E_mark_at_observation", mark_has_fill, mark_has_fill2),
+                        ("previous_actual_cumulative", prev_has_fill, prev_has_fill2)):
         if col in out.columns:
-            out[col] = moved(col, mask)
+            out[col] = moved(col, m1, m2)
     return out, info
 
 
@@ -782,7 +830,7 @@ def recompute_gated_ledger(df: pd.DataFrame, p0: float | None = None,
 
     ``genesis_baseline`` (ค่าเริ่มต้น False = พฤติกรรมเดิมทุกประการ ใช้ตรวจสัญญา/integrity): True = โหมด **แสดงผล**
     ที่แถว n = 0 เริ่มจาก 0 — fill แรกของ chain ไม่ book slippage (quote → fill) เป็น ΔA₀ (P_fill := P₀)
-    และ P_acted ถัดไปเป็นราคา fill; แถว frozen v2/v3 ที่ DB นับ slippage ไว้ถูกหักออกด้วย
+    และคง P_acted ถัดไปเป็น P₀; แถว frozen v2/v3 ที่ DB นับ slippage ไว้ถูกปรับด้วย
     ``normalize_genesis_baseline``
     """
     def note(**fields) -> None:
@@ -845,7 +893,7 @@ def recompute_gated_ledger(df: pd.DataFrame, p0: float | None = None,
                          acted_idx_before=0, A_prev=0.0, p_quote=Pi)
                     A_prev += d
                     dA[i], A[i], E[i] = d, A_prev, A_prev - R[i]
-                    acted = action_price
+                    acted = (float(p0) if p0 is not None else Pi) if genesis_baseline else action_price
                 else:
                     note(kind="genesis", acted_before=acted, acted_idx_before=0,
                          A_prev=0.0)
@@ -1072,7 +1120,7 @@ class _LedgerExplainer:
             return False
 
     def _fill_lines(self, row, quote: float) -> list[str]:
-        """fill แรกของ chain (ถ้ามี): ไม่นับ slippage เป็นกำไร และ P_acted ถัดไปคือราคา fill"""
+        """fill แรกของ chain (ถ้ามี): ไม่นับ slippage เป็นกำไร และ P_acted ถัดไปคือ P₀"""
         fill = _meta_num(row, "execution_price")
         if not (self.semantics[0] in _EXECUTION_SEMANTICS
                 and str(row.get("cashflow_status")) == CASHFLOW_FINALIZED
@@ -1081,8 +1129,10 @@ class _LedgerExplainer:
         lines = []
         if _meta_flag(row, "initial_funding"):
             lines.append(f"policy {FUNDING_BASELINE_POLICY}: ซื้อครั้งแรกเป็นเงินตั้งต้น ไม่ใช่กำไร/ขาดทุน")
+        next_acted = fill if _meta_flag(row, "initial_funding") else (
+            self.baseline["p_prev"] if self.baseline is not None else quote)
         lines.append(f"fill จริง {_f(fill)} (slippage {fill - quote:+,.4f} จาก quote) เป็นเงินตั้งต้น "
-                     f"ไม่นับเป็นกำไร/ขาดทุน · P_acted ของ act ถัดไป = {_f(fill)}")
+                     f"ไม่นับเป็นกำไร/ขาดทุน · P_acted ของ act ถัดไป = {_f(next_acted)}")
         return lines
 
     def _genesis_text(self, i: int, which: str) -> str:
@@ -1123,10 +1173,17 @@ class _LedgerExplainer:
                 or col not in self.fixed.columns):
             return ""
         raw, shown, shift = _meta_num(self.raw.iloc[i], col), self._val(i, col), self.baseline["shift"]
-        if raw is None or abs((raw - shown) - shift) > 1e-6 * max(1.0, abs(self.baseline["fix_c"])):
+        scale = 1e-6 * max(1.0, abs(self.baseline["fix_c"]))
+        if raw is None or abs(raw - shown) <= scale:
             return ""
-        return (f"\nค่าที่ DB บันทึก {_f(raw)} − slippage ของ fill แรกที่ตัดออก {_f(shift)} "
-                f"= {_f(shown)} (rebase n = 0)")
+        if abs((raw - shown) - shift) <= scale:
+            return (f"\nค่าที่ DB บันทึก {_f(raw)} − slippage ของ fill แรกที่ตัดออก {_f(shift)} "
+                    f"= {_f(shown)} (rebase n = 0)")
+        if col == "ΔAₙ ต่อสเต็ป (USD)":
+            return (f"\nค่าที่ DB บันทึก {_f(raw)} (ใช้ previous_action_price = {_f(self.baseline['p_fill'])}) "
+                    f"→ ใช้ P₀ = {_f(self.baseline['p_prev'])} ได้ {_f(shown)} (rebase n = 0)")
+        return (f"\nค่าที่ DB บันทึก {_f(raw)} → ปรับตาม previous_action_price = P₀ "
+                f"({_f(self.baseline['p_prev'])}) เป็น {_f(shown)} (rebase n = 0)")
 
     # ---- ΔAₙ / Aₙ / Eₙ ----------------------------------------------------
     def delta(self, i: int) -> str:
