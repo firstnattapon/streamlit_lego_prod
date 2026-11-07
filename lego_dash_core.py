@@ -5,6 +5,8 @@
 - order_columns    : บังคับลำดับสัญญา 17 คอลัมน์ (RTDB ไม่การันตีลำดับ key) + meta ต่อท้าย
 - integrity_report : ตรวจสมการ LEGO ต่อแถวจากค่า full precision (E1–E8)
 - recompute_gated_ledger : derive recurrence ใหม่ตามหลักการแช่แข็ง ก่อนแสดงผลเสมอ
+- ledger_day_choices / ledger_day_rows : ตัวกรองวัน (UTC) ของกราฟ/ตาราง/audit — เลือกแถวตามตำแหน่ง
+- excess_total_by_stock : Eₙ สะสม ผลรวมทุกตัว (หุ้นละ 1 chain ล่าสุด คำนวณแบบเดียวกับ metric รายตัว)
 
 รองรับ cashflow contract ตาม ``semantics`` ของแต่ละแถว:
 - gated_theoretical_v2: act จาก decision READY_* + signal/quantity ตาม historical contract
@@ -15,6 +17,7 @@
 from __future__ import annotations
 
 import math
+from datetime import datetime, timezone
 from typing import Iterable
 
 import numpy as np
@@ -187,6 +190,139 @@ def pending_broker_fee_count(audit_rows: pd.DataFrame) -> int:
         return 0
     return int(audit_rows["broker_fee_status"].fillna("").astype(str)
                .str.upper().eq("PENDING").sum())
+
+
+# ----------------------------------------------------------------------------
+# ตัวกรองวันของแท็บ Live (กราฟ · ตาราง 17 คอลัมน์ · Order audit)
+# วัน = วันตามปฏิทิน UTC ของคอลัมน์ 1 "เวลา (UTC)" — รอบตลาดสหรัฐฯ (13:30–21:00 UTC) อยู่ในวัน UTC
+# เดียว จึงตรงกับวันทำการ (prefix ของ market_slot_id); เวลาไทย (UTC+7) จะแบ่งรอบเดียวเป็น 2 วัน.
+# เลือกแถวด้วย "ตำแหน่ง" (ไม่ใช่ index) เพราะ tooltip เรียงตามตำแหน่ง และ frame หลังกรอง chain
+# มี index ไม่ต่อเนื่อง. ledger คำนวณจากทั้ง chain ก่อนแล้วจึงเลือกแถว — ตัวเลขไม่เปลี่ยน
+# ----------------------------------------------------------------------------
+ALL_DAYS = "ทุกวัน (ทั้ง chain)"
+
+
+def _utc_stamp(value) -> datetime | None:
+    """เวลา ISO-8601 -> datetime UTC (ไม่มี offset ถือเป็น UTC ตามชื่อคอลัมน์); อ่านไม่ได้ -> None
+
+    แปลงทีละค่า: pd.to_datetime ทั้งคอลัมน์แบบ ISO8601 เอา offset ของแถวก่อนหน้ามาใช้กับแถวที่ไม่มี offset
+    """
+    if isinstance(value, datetime):                # รวม pd.Timestamp; pd.NaT ก็เป็น datetime
+        if pd.isna(value):
+            return None
+        stamp = value
+    elif isinstance(value, str):
+        try:
+            stamp = datetime.fromisoformat(value.strip())   # Python ≥ 3.11 รับ "...Z"
+        except ValueError:
+            return None
+    else:
+        return None
+    if stamp.tzinfo is None:
+        return stamp.replace(tzinfo=timezone.utc)
+    return stamp.astimezone(timezone.utc)
+
+
+def _row_days(df: pd.DataFrame) -> list[str | None]:
+    """วัน UTC ("YYYY-MM-DD") ของแต่ละแถวตามตำแหน่ง; ไม่มีคอลัมน์เวลา/อ่านไม่ได้ -> None"""
+    time_col = COLUMN_ORDER[0]
+    if time_col not in df.columns:
+        return [None] * len(df)
+    stamps = (_utc_stamp(value) for value in df[time_col].tolist())
+    return [None if stamp is None else stamp.date().isoformat() for stamp in stamps]
+
+
+def ledger_day_choices(df: pd.DataFrame) -> list[str]:
+    """วัน (UTC) ที่มีแถว ไม่ซ้ำ เรียงล่าสุดก่อน — ตัวแรกคือค่าเริ่มต้นของตัวกรอง
+
+    แถวที่อ่านเวลาไม่ได้ไม่เป็นตัวเลือก (เห็นเฉพาะเมื่อเลือก ``ALL_DAYS``)
+    """
+    return sorted({day for day in _row_days(df) if day is not None}, reverse=True)
+
+
+def ledger_day_rows(df: pd.DataFrame, day: str | None) -> list[int]:
+    """ตำแหน่งแถว (0..n-1) ที่อยู่ในวัน ``day``; ``None``/``ALL_DAYS`` -> ทุกแถว"""
+    if day is None or day == ALL_DAYS:
+        return list(range(len(df)))
+    return [i for i, row_day in enumerate(_row_days(df)) if row_day == day]
+
+
+def _chain_asset(chain_key, chain: pd.DataFrame) -> str:
+    """ชื่อหุ้นของ chain: "สินทรัพย์" ของแถวล่าสุด; ไม่มี -> chain_key ก่อน "_" ตัวสุดท้าย
+    (backend: chain_key = <symbol>_<config_hash>)"""
+    if "สินทรัพย์" in chain.columns and not chain.empty:
+        value = chain["สินทรัพย์"].iloc[-1]
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    if chain_key is None:
+        return "—"
+    return str(chain_key).rsplit("_", 1)[0]
+
+
+def _last_row_stamp(chain: pd.DataFrame) -> str:
+    """เวลา UTC ของแถวล่าสุด (ISO) ไว้เรียง chain เมื่อ state ไม่มี updated_at; อ่านไม่ได้ -> \"\" """
+    time_col = COLUMN_ORDER[0]
+    if chain.empty or time_col not in chain.columns:
+        return ""
+    stamp = _utc_stamp(chain[time_col].iloc[-1])
+    return "" if stamp is None else stamp.isoformat()
+
+
+def excess_total_by_stock(rows: pd.DataFrame, state: dict | None, *,
+                          include_paper: bool = True) -> dict:
+    """"Eₙ สะสม (USD) ผลรวมทุกตัว": ผลบวก Eₙ แถวล่าสุดของ chain ล่าสุดของแต่ละหุ้น
+
+    - ``rows`` = แถว committed ของทุก chain (ผลของ ``rows_to_df`` ก่อนเลือก chain); แบ่ง chain
+      แบบเดียวกับหน้า Live (chain เดียว = ทุกแถว)
+    - หุ้นละ 1 chain: ``state[ck].updated_at`` มากสุด (กติกาเดียวกับ ``default_chain_index``)
+      เท่ากัน/ไม่มี -> เวลาแถวล่าสุด แล้วจึง chain_key — chain ของ config เก่าจึงไม่ถูกนับ
+    - Eₙ ของ chain = แถวล่าสุดของ ``recompute_gated_ledger(..., p0=state[ck].p0,
+      genesis_baseline=True)`` ชุดเดียวกับ metric "Eₙ สะสม (USD)" (รายตัว) ของ chain ที่เลือก
+    - ``include_paper=False`` (หน้า PROD): ไม่นับ chain ที่ state ตีตรา paper (เงินจำลอง)
+
+    คืน ``{"total", "parts": [{"asset", "chain_key", "excess"}], "paper": [ck], "failed": [ck]}``
+    — chain ที่คำนวณไม่ได้อยู่ใน ``failed`` และไม่ถูกรวม (ผลรวมเป็นส่วนเสริม ห้ามทำให้หน้าล่ม)
+    """
+    out: dict = {"total": 0.0, "parts": [], "paper": [], "failed": []}
+    if rows is None or rows.empty:
+        return out
+    state = state if isinstance(state, dict) else {}
+    chains = sorted(rows["chain_key"].dropna().unique()) if "chain_key" in rows else []
+    if len(chains) > 1:
+        frames = [(ck, rows[rows["chain_key"] == ck]) for ck in chains]
+    elif chains:
+        frames = [(chains[0], rows)]
+    else:
+        frames = [(None, rows)]
+
+    latest: dict[str, tuple] = {}
+    for ck, chain in frames:
+        info = state.get(ck) if ck is not None else None
+        info = info if isinstance(info, dict) else {}
+        if not include_paper and info.get("paper"):
+            out["paper"].append(ck)
+            continue
+        asset = _chain_asset(ck, chain)
+        rank = (str(info.get("updated_at") or ""), _last_row_stamp(chain), str(ck or ""))
+        if asset not in latest or rank > latest[asset][0]:
+            latest[asset] = (rank, ck, chain, info)
+
+    for asset in sorted(latest):
+        _, ck, chain, info = latest[asset]
+        try:
+            raw = info.get("p0")
+            p0 = float(raw) if raw is not None else None
+            shown = recompute_gated_ledger(chain, p0=p0, genesis_baseline=True)
+            excess = float(shown["Eₙ ส่วนเกินสะสม (USD)"].iloc[-1])
+        except Exception:                          # noqa: BLE001 — chain เดียวพังต้องไม่ทำให้หน้าล่ม
+            out["failed"].append(ck)
+            continue
+        if not math.isfinite(excess):
+            out["failed"].append(ck)
+            continue
+        out["parts"].append({"asset": asset, "chain_key": ck, "excess": excess})
+    out["total"] = math.fsum(part["excess"] for part in out["parts"])
+    return out
 
 
 def _max_abs(s: pd.Series) -> float:
