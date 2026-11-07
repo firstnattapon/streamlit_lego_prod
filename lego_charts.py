@@ -4,7 +4,7 @@
   - ledger_figure        : Rₙ (อ้างอิง) vs Aₙ vs Eₙ ของ chain เดียว (Live + Rebalancing 101)
   - total_excess_figure  : Σ Eₙ รวมทุกหุ้น + เส้นรายหุ้น ตามเวลา (UTC)
 
-กติกาการออกแบบ (dataviz): แกน y เดียว, เส้น 2px, marker 8px มีวงขอบสีพื้น, ตัวหนังสือใช้สี
+กติกาการออกแบบ (dataviz): แกน y เดียว, เส้นบาง 1–2px (ค่าใน ``LINE``), จุด act 5px มีวงขอบสีพื้น, ตัวหนังสือใช้สี
 text token ไม่ใช้สีเส้น, grid จาง, hover แบบ crosshair, legend เมื่อมี ≥ 2 series และ
 label ค่าล่าสุดที่ปลายเส้นเมื่อมีไม่เกิน 4 series. สี categorical ผ่าน validate_palette.js
 ทั้งโหมด light และ dark (dark เป็น step ที่เลือกสำหรับพื้นมืด ไม่ใช่การกลับสีอัตโนมัติ)
@@ -55,7 +55,19 @@ ACT_NAME = "act (เทรดจริง)"
 TOTAL_NAME = "Σ Eₙ รวม"
 OTHER_NAME = "อื่น ๆ"
 TOTAL_COL = "รวม"                 # ต้องตรงกับ lego_dash_core.TOTAL_EXCESS_COL
-MAX_ACT_MARKERS = 150             # มากกว่านี้จุดจะทับกันจนอ่านไม่ออก -> แสดงเฉพาะเส้น
+MAX_ACT_MARKERS = 60              # มากกว่านี้จุดจะทับกันจนอ่านไม่ออก -> แสดงเฉพาะเส้น
+# ความหนาเส้น (px) / ขนาดจุด / ความทึบพื้นที่ใต้เส้น — ปรับที่นี่ที่เดียว
+# เส้นบางแบบกราฟการเงิน: เส้นอ้างอิงบางสุด, เส้นผลรวมหนาสุดเพื่อให้ยังเด่นกว่าเส้นรายหุ้น
+LINE = {
+    "reference": 1.0,       # Rₙ อ้างอิง (เส้นประ)
+    "actual": 1.25,         # Aₙ สะสม
+    "excess": 1.5,          # Eₙ ส่วนเกินสะสม
+    "symbol": 1.25,         # Eₙ รายหุ้น ในกราฟผลรวม
+    "total": 2.0,           # Σ Eₙ ผลรวม
+}
+REFERENCE_DASH = "4px,3px"
+ACT_MARKER = {"size": 5, "ring": 1}
+FILL_ALPHA = {"excess": 0.06, "total": 0.05}
 MAX_DIRECT_LABELS = 4
 # ห้ามขึ้นต้นด้วย "+": Plotly adjustFormat เติม "~" หน้า format ที่ไม่ขึ้นต้นด้วย ~ , . 0 $
 # "+,.2f" จึงกลายเป็น "~+,.2f" ที่ d3 อ่านไม่ได้ แล้ว hover โชว์ทศนิยมเต็ม
@@ -151,20 +163,20 @@ def ledger_figure(x: Sequence, r: Sequence[float], a: Sequence[float],
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=xs, y=rs, name=r_name, mode="lines",
-        line=dict(color=tok["text_secondary"], width=2, dash="dash"),
+        line=dict(color=tok["text_secondary"], width=LINE["reference"], dash=REFERENCE_DASH),
         hovertemplate=f"{r_name}: {USD}<extra></extra>"))
     a_template = f"{a_name}: {USD}"
     if hover_text is not None:
         a_template += "<br><span style='font-size:12px'>%{customdata}</span>"
     fig.add_trace(go.Scatter(
         x=xs, y=as_, name=a_name, mode="lines",
-        line=dict(color=blue, width=2),
+        line=dict(color=blue, width=LINE["actual"]),
         customdata=list(hover_text) if hover_text is not None else None,
         hovertemplate=a_template + "<extra></extra>"))
     fig.add_trace(go.Scatter(
         x=xs, y=es, name=e_name, mode="lines",
-        line=dict(color=orange, width=2),
-        fill="tozeroy", fillcolor=_rgba(orange, 0.12),
+        line=dict(color=orange, width=LINE["excess"]),
+        fill="tozeroy", fillcolor=_rgba(orange, FILL_ALPHA["excess"]),
         hovertemplate=f"{e_name}: {USD}<extra></extra>"))
     if acted is not None:
         flags = [bool(v) for v in acted]
@@ -173,8 +185,8 @@ def ledger_figure(x: Sequence, r: Sequence[float], a: Sequence[float],
                 x=[v for v, f in zip(xs, flags) if f],
                 y=[v for v, f in zip(as_, flags) if f],
                 name=ACT_NAME, mode="markers", hoverinfo="skip",
-                marker=dict(size=8, color=blue,
-                            line=dict(color=tok["surface"], width=2))))
+                marker=dict(size=ACT_MARKER["size"], color=blue,
+                            line=dict(color=tok["surface"], width=ACT_MARKER["ring"]))))
     fig.update_layout(**_base_layout(tok, height=height, x_title=x_title))
     if xs:
         _direct_labels(fig, tok, xs[-1],
@@ -216,7 +228,7 @@ def total_excess_figure(timeline: pd.DataFrame, *, theme: str | None = None,
         other = symbol == OTHER_NAME
         fig.add_trace(go.Scatter(
             x=x, y=y, name=str(symbol), mode="lines", line_shape="hv",
-            line=dict(width=1.75, dash="dot" if other else "solid",
+            line=dict(width=LINE["symbol"], dash="dot" if other else "solid",
                       color=tok["text_secondary"] if other else tok["series"][slot]),
             hovertemplate=f"{symbol}: {USD}<extra></extra>"))
         if y:
@@ -226,8 +238,8 @@ def total_excess_figure(timeline: pd.DataFrame, *, theme: str | None = None,
         values += total
         fig.add_trace(go.Scatter(
             x=x, y=total, name=TOTAL_NAME, mode="lines", line_shape="hv",
-            line=dict(width=3, color=tok["text_primary"]),
-            fill="tozeroy", fillcolor=_rgba(tok["text_primary"][:7], 0.07),
+            line=dict(width=LINE["total"], color=tok["text_primary"]),
+            fill="tozeroy", fillcolor=_rgba(tok["text_primary"][:7], FILL_ALPHA["total"]),
             hovertemplate=f"<b>{TOTAL_NAME}: {USD}</b><extra></extra>"))
     layout = _base_layout(tok, height=height, x_title="")
     layout["xaxis"].update(
