@@ -85,8 +85,11 @@ def test_ledger_figure_traces_single_axis_and_usd_hover():
         assert "%{y:,.2f} USD" in trace.hovertemplate
     assert "%{customdata}" in fig.data[1].hovertemplate
     assert list(fig.data[3].x) == [1, 3, 4]                       # จุด act เฉพาะแถว act
-    assert fig.data[3].marker.size == 8
-    assert fig.data[0].line.dash == "dash"                        # Rₙ = เส้นอ้างอิง
+    assert fig.data[3].marker.size == 5 and fig.data[3].marker.line.width == 1
+    # เส้นบาง: ทุกเส้นข้อมูล ≤ 2px และเส้นอ้างอิง Rₙ บางที่สุด
+    widths = [trace.line.width for trace in fig.data[:3]]
+    assert max(widths) <= 2 and widths[0] == min(widths)
+    assert fig.data[0].line.dash not in (None, "solid")          # Rₙ = เส้นอ้างอิง (เส้นประ)
     assert len(fig.layout.annotations) == 3                       # label ค่าล่าสุด Rₙ/Aₙ/Eₙ
 
 
@@ -123,7 +126,9 @@ def test_total_excess_figure_lines_per_stock_plus_bold_total():
     assert [t.name for t in fig.data] == ["AAPL", "NVDA", "TSLA", TOTAL_NAME]
     assert [t.line.color for t in fig.data[:3]] == tok["series"][:3]
     assert all(t.line.shape == "hv" for t in fig.data)
-    assert fig.data[-1].line.width == 3 and fig.data[-1].line.color == tok["text_primary"]
+    assert fig.data[-1].line.width == 2 and fig.data[-1].line.color == tok["text_primary"]
+    # เส้นบาง แต่เส้นผลรวมยังหนากว่าเส้นรายหุ้นทุกเส้น
+    assert all(t.line.width < fig.data[-1].line.width for t in fig.data[:-1])
     assert fig.layout.xaxis.type == "date"
     assert "yaxis2" not in fig.layout.to_plotly_json()
     texts = [a.text for a in fig.layout.annotations]
