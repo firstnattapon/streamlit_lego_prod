@@ -388,27 +388,31 @@ def render_live_dashboard(paper: bool = False) -> None:
             st.error("พบแถวที่ไม่สอดคล้องสมการ — ตรวจ chain/engine ก่อนเชื่อกราฟ")
 
     # audit เฉพาะ chain ที่เลือก — ผูกด้วย run_id กัน order ข้าม chain ปนตาราง
-    # และเฉพาะแถวที่ตัวกรองวันแสดง (วันของ order = วันของแถวที่ order ผูกอยู่)
     audit = _ref(AUDIT_PATH, paper).get() or {}
     if audit:
-        run_ids = view["run_id"] if "run_id" in view.columns else []
-        adf = filter_audit_rows(audit, run_ids)
-        if adf.empty and len(rows) < len(df) and "run_id" in df.columns \
-                and not filter_audit_rows(audit, df["run_id"]).empty:
+        chain_adf = filter_audit_rows(audit, df["run_id"] if "run_id" in df.columns else [])
+        if not chain_adf.empty:
             st.subheader("Order audit (redacted)")
-            st.caption(f"ไม่มี order ในวันที่เลือก — เลือก “{ALL_DAYS}” เพื่อดู order ทั้ง chain")
-        if not adf.empty:
-            adf = audit_with_ledger_time(adf, view)
-            st.subheader("Order audit (redacted)")
-            pending_fees = pending_broker_fee_count(adf)
+            filtered = len(rows) < len(df)
+            # นับจาก audit ทั้ง chain: คำเตือน money fence ต้องไม่หายเพราะตัวกรองวัน
+            pending_fees = pending_broker_fee_count(chain_adf)
             if pending_fees:
                 st.warning(
                     f"มี {pending_fees} fill ที่ broker fee ยังเป็น PENDING — "
-                    "ระบบไม่ถือเป็นศูนย์และยังไม่ปลด money fence จนกว่าจะกระทบยอด")
-            diagnostic_columns = [name for name in ("เวลา (UTC)", "run_id", "status", "reject_reason",
-                                  "terminal_reason", "filled_quantity", "broker_fee_status") if name in adf]
-            st.dataframe(adf[diagnostic_columns + [name for name in adf if name not in diagnostic_columns]],
-                         width="stretch")
+                    "ระบบไม่ถือเป็นศูนย์และยังไม่ปลด money fence จนกว่าจะกระทบยอด"
+                    + (" (นับทั้ง chain ไม่ขึ้นกับวันที่เลือก)" if filtered else ""))
+            # ตารางแสดงเฉพาะ order ของแถวที่ตัวกรองวันแสดง (วันของ order = วันของแถวที่ order ผูกอยู่)
+            adf = (filter_audit_rows(audit, view["run_id"] if "run_id" in view.columns else [])
+                   if filtered else chain_adf)
+            if adf.empty:
+                st.caption(f"ไม่มี order ในวันที่เลือก — เลือก “{ALL_DAYS}” เพื่อดู order ทั้ง chain")
+            else:
+                adf = audit_with_ledger_time(adf, view)
+                diagnostic_columns = [name for name in ("เวลา (UTC)", "run_id", "status", "reject_reason",
+                                      "terminal_reason", "filled_quantity", "broker_fee_status")
+                                      if name in adf]
+                st.dataframe(adf[diagnostic_columns + [name for name in adf if name not in diagnostic_columns]],
+                             width="stretch")
 
 
 def render_rebalancing_101() -> None:

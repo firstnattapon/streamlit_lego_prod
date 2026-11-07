@@ -309,6 +309,45 @@ def test_a_day_without_orders_says_so(monkeypatch):
     assert list(audit_table(page)["run_id"]) == [f"{CHAIN}-1"]
 
 
+def fee_page(monkeypatch, audited) -> AppTest:
+    """fill แรก (แถว 3) อยู่วันก่อนและ fee ยัง PENDING; fill ที่สอง (แถว 5) อยู่วันล่าสุด fee FINAL"""
+    rows = chain(CHAIN, "AAPL", days=(DAY1,) * 4 + (DAY2,) * 2)
+    fees = {3: "PENDING", 5: "FINAL"}
+    audit = {f"{CHAIN}-{i}": {"run_id": f"{CHAIN}-{i}", "status": "FILLED",
+                              "broker_fee_status": fees[i]} for i in audited}
+    databases(monkeypatch, prod={
+        "webull_lego_rows": rtdb_rows(rows),
+        "webull_lego_state": {CHAIN: {"p0": P0, "updated_at": f"{DAY2}T14:05:00Z"}},
+        "webull_lego_order_audit": audit})
+    return app()
+
+
+def pending_fee_warnings(page: AppTest) -> list[str]:
+    return [w.value for w in page.warning if "broker fee ยังเป็น PENDING" in w.value]
+
+
+def test_a_pending_broker_fee_from_an_earlier_day_still_warns(monkeypatch):
+    """คำเตือน money fence นับจากทั้ง chain — ต้องไม่หายเพราะตัวกรองวัน"""
+    page = fee_page(monkeypatch, audited=(3, 5))
+    page.run(timeout=30)
+    assert not page.exception and day_box(page).value == DAY2
+    assert list(audit_table(page)["run_id"]) == [f"{CHAIN}-5"]      # ตาราง: order ของวันล่าสุด
+    warnings = pending_fee_warnings(page)
+    assert len(warnings) == 1 and "มี 1 fill" in warnings[0] and "นับทั้ง chain" in warnings[0]
+
+    day_box(page).set_value(ALL_DAYS).run(timeout=30)
+    warnings = pending_fee_warnings(page)
+    assert len(warnings) == 1 and "นับทั้ง chain" not in warnings[0]   # ไม่กรอง = ข้อความเดิม
+
+
+def test_a_day_without_orders_still_shows_the_pending_fee_warning(monkeypatch):
+    page = fee_page(monkeypatch, audited=(3,))
+    page.run(timeout=30)
+    assert not page.exception and audit_table(page) is None
+    assert any("ไม่มี order ในวันที่เลือก" in c.value for c in page.caption)
+    assert len(pending_fee_warnings(page)) == 1
+
+
 def test_switching_chain_returns_the_filter_to_the_latest_day(monkeypatch):
     databases(monkeypatch, prod={
         "webull_lego_rows": rtdb_rows(two_days(), two_days("QBTS_x", "QBTS")),

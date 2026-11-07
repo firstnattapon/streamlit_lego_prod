@@ -145,7 +145,8 @@ chain ที่ bot ใช้ LEAPS: คอลัมน์ 7 "จำนวนถ
 - กลับไปวันล่าสุดเองเมื่อสลับ PROD/PAPER เปลี่ยน chain หรือมีวันใหม่ ส่วนวันที่เลือกเองยังค้างอยู่ระหว่างกด widget อื่น
 - มีผลกับกราฟ ตาราง 17 คอลัมน์ และ Order audit (order ผูกกับแถวด้วย `run_id` วันของ order จึงเป็นวันของแถวนั้น)
 - Rₙ / ΔAₙ / Aₙ / Eₙ และ tooltip ยังคำนวณจากทั้ง chain ก่อนกรอง ตัวกรองแค่เลือกแถวที่แสดง: tooltip ของแถวแรกในวันยังอ้าง P_acted / Aₙ₋₁ จากวันก่อนได้ถูกต้อง
-- metric, ป้ายแจ้ง, caption LEAPS และ Integrity check ใช้ทั้ง chain เสมอ
+- metric, ป้ายแจ้ง, caption LEAPS, Integrity check และคำเตือน broker fee PENDING (money fence) ใช้ทั้ง chain เสมอ
+  ถ้า fee ของ fill วันก่อนยัง PENDING คำเตือนก็ยังขึ้นตอนดูวันล่าสุด
 
 **metric "Eₙ สะสม (USD) ผลรวมทุกตัว"**: อยู่ข้าง "Eₙ สะสม (USD)" ซึ่งยังเป็นค่าของ chain ที่เลือก
 
