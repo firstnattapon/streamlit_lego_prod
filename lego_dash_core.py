@@ -5,6 +5,8 @@
 - order_columns    : บังคับลำดับสัญญา 17 คอลัมน์ (RTDB ไม่การันตีลำดับ key) + meta ต่อท้าย
 - integrity_report : ตรวจสมการ LEGO ต่อแถวจากค่า full precision (E1–E8)
 - recompute_gated_ledger : derive recurrence ใหม่ตามหลักการแช่แข็ง ก่อนแสดงผลเสมอ
+- day_options / day_positions : ตัวกรองวัน (UTC) — เลือกแค่แถวที่แสดง ledger คำนวณจากทั้ง chain
+- latest_excess_total : Eₙ ผลรวมทุกตัว (chain ล่าสุดของแต่ละหุ้น, หน้า PROD ไม่นับ chain PAPER)
 
 รองรับ cashflow contract ตาม ``semantics`` ของแต่ละแถว:
 - gated_theoretical_v2: act จาก decision READY_* + signal/quantity ตาม historical contract
@@ -15,6 +17,7 @@
 from __future__ import annotations
 
 import math
+import re
 from typing import Iterable
 
 import numpy as np
@@ -1477,6 +1480,184 @@ def leaps_summary(df: pd.DataFrame) -> dict | None:
             if "leaps_shares_changed_from" in df.columns else 0,
             "text": f"หุ้นจริง {_shares(real)} + LEAPS {_shares(leaps)} = "
                     f"{_shares(holdings) if holdings is not None else '—'}"}
+
+
+# ============================================================================
+# Live Dashboard — ตัวกรองวัน (UTC) และ metric "Eₙ สะสม (USD) ผลรวมทุกตัว" (เปลี่ยนแค่การแสดงผล)
+# ----------------------------------------------------------------------------
+# ตัวกรองวันเลือกแค่ "แถวที่แสดง" ในกราฟ / ตาราง 17 คอลัมน์ / Order audit — ledger ถูกคำนวณจากทั้ง chain
+# ก่อนกรองเสมอ. ผลรวม Eₙ ใช้ call เดียวกับที่หน้าเว็บทำ metric "Eₙ สะสม (USD)" ของ chain ที่เลือก
+# ไม่มีสูตรใหม่
+# ============================================================================
+ALL_DAYS = "ทุกวัน (ทั้ง chain)"
+
+
+def utc_days(df: pd.DataFrame) -> list[str | None]:
+    """วัน UTC (``YYYY-MM-DD``) ของแต่ละแถวตามตำแหน่ง จาก "เวลา (UTC)" — อ่านไม่ได้/ไม่มีคอลัมน์ -> None
+
+    เวลาที่มี offset อื่น (เช่น +07:00) ถูกแปลงเป็น UTC ก่อนตัดวัน; เวลาไม่มี offset ถือเป็น UTC.
+    อ่านทีละค่า (``format="mixed"``): แบบ "ISO8601" ของ pandas 2.3 ทำให้ค่าไม่มี offset ที่ตามหลังค่า
+    +07:00 ติด offset นั้นไปด้วย แถวจึงไปอยู่ผิดวัน
+    """
+    time_col = COLUMN_ORDER[0]
+    if time_col not in df.columns:
+        return [None] * len(df)
+    raw = df[time_col]
+    text = raw.where(raw.map(lambda value: isinstance(value, str)), None)
+    stamps = pd.to_datetime(text, utc=True, errors="coerce", format="mixed")
+    return [stamp.strftime("%Y-%m-%d") if pd.notna(stamp) else None for stamp in stamps]
+
+
+def day_options(df: pd.DataFrame) -> list[str]:
+    """ตัวเลือกของตัวกรองวัน: ``[วันล่าสุด, …, วันแรก, ALL_DAYS]`` — ตัวแรก (วันล่าสุด) คือค่าเริ่มต้น
+
+    วันล่าสุด = วัน UTC ล่าสุดที่ chain มีแถว ไม่ใช่วันนี้ตามปฏิทิน (ก่อนตลาด US เปิดจึงเห็น session ล่าสุด
+    ไม่ใช่หน้าว่าง) · ไม่มีเวลาที่อ่านได้เลย -> ``[]`` (หน้าเว็บไม่แสดงตัวกรองและแสดงทุกแถวเหมือนเดิม)
+    """
+    days = sorted({day for day in utc_days(df) if day is not None}, reverse=True)
+    return [*days, ALL_DAYS] if days else []
+
+
+def day_positions(df: pd.DataFrame, day: str | None) -> list[int]:
+    """ตำแหน่งแถว (0..n-1) ที่แสดงเมื่อเลือก ``day`` — ``ALL_DAYS``/None = ทุกแถว
+
+    ใช้ตำแหน่งชุดเดียวกันเลือกทั้งแถว ledger, tooltip และ run_id ของ Order audit;
+    แถวที่เวลาอ่านไม่ได้เห็นได้เฉพาะใน ``ALL_DAYS``
+    """
+    if day is None or day == ALL_DAYS:
+        return list(range(len(df)))
+    return [i for i, row_day in enumerate(utc_days(df)) if row_day == day]
+
+
+def _state_entry(state, chain_key) -> dict:
+    """state pointer ของ chain (dict) — ไม่มี/ผิดรูป -> {}"""
+    if not chain_key or not isinstance(state, dict):
+        return {}
+    entry = state.get(chain_key)
+    return entry if isinstance(entry, dict) else {}
+
+
+def chain_p0_hint(state: dict | None, chain_key) -> float | None:
+    """P₀ ของ chain จาก state pointer (chain ตัดหน้า) — None = ไม่มี (recompute ใช้ราคาแถว genesis)
+
+    ตัวเดียวกับที่ Live Dashboard ส่งให้ ``recompute_gated_ledger`` ของ chain ที่เลือก
+    และที่ ``latest_excess_total`` ใช้กับทุก chain
+    """
+    raw = _state_entry(state, chain_key).get("p0")
+    return float(raw) if raw is not None else None
+
+
+_MD_SPECIAL = re.compile(r"([\\`*_{}\[\]()#+\-.!|<>~:$])")
+
+
+def _md_text(text) -> str:
+    """ข้อความจาก DB ใน help ของ metric (Markdown): escape อักขระพิเศษ ไม่ให้ถูกตีความเป็น format"""
+    return _MD_SPECIAL.sub(r"\\\1", " ".join(str(text).split()))
+
+
+def _md_code(text) -> str:
+    """chain_key จาก DB ใน help ของ metric: code span (backtick ในค่าถูกแทนด้วย ')"""
+    return "`" + " ".join(str(text).replace("`", "'").split()) + "`"
+
+
+def _chain_symbol(last: pd.Series, entry: dict, chain_key) -> str:
+    """หุ้นของ chain: "สินทรัพย์" ของแถวล่าสุด -> state.symbol -> chain_key"""
+    for value in (last.get("สินทรัพย์"), entry.get("symbol")):
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return str(chain_key)
+
+
+_NO_TIME = pd.Timestamp.min.tz_localize("UTC")
+
+
+def _chain_updated_at(entry: dict, last: pd.Series) -> pd.Timestamp:
+    """เวลาที่ chain ขยับล่าสุด: state.updated_at (กติกาเดียวกับ default_chain_index) -> เวลาแถวล่าสุด"""
+    for value in (entry.get("updated_at"), last.get(COLUMN_ORDER[0])):
+        if isinstance(value, str):
+            stamp = pd.to_datetime(value, utc=True, errors="coerce", format="mixed")
+            if pd.notna(stamp):
+                return stamp
+    return _NO_TIME
+
+
+def _is_paper_chain(entry: dict, rows: pd.DataFrame) -> bool:
+    """chain ที่ backend ตีตรา paper: state pointer (ธงเดียวกับป้าย PAPER) หรือแถวที่ paper = True"""
+    if entry.get("paper"):
+        return True
+    return "paper" in rows.columns and bool(rows["paper"].eq(True).any())
+
+
+def latest_excess_total(df: pd.DataFrame, state: dict | None, *,
+                        paper_page: bool = False) -> dict:
+    """metric "Eₙ สะสม (USD) ผลรวมทุกตัว": ผลบวก Eₙ ของ chain ล่าสุดของแต่ละหุ้น (read-only)
+
+    - Eₙ ของแต่ละ chain = ค่าที่ metric "Eₙ สะสม (USD)" แสดงเมื่อเลือก chain นั้น: แบ่งแถวแบบเดียวกับหน้าเว็บ
+      (หลาย chain กรองด้วย chain_key, chain เดียว/ไม่มี key ใช้ทั้ง frame) แล้ว
+      ``recompute_gated_ledger(..., genesis_baseline=True)`` ด้วย P₀ จาก ``chain_p0_hint`` — ไม่มีสูตรใหม่
+    - หุ้นของ chain = "สินทรัพย์" ของแถวล่าสุด (ไม่มี -> state.symbol -> chain_key)
+    - chain ล่าสุดของหุ้น = state.updated_at ล่าสุด (ไม่มี -> "เวลา (UTC)" ของแถวล่าสุด; เท่ากัน -> chain_key)
+    - หน้า PROD (``paper_page=False``) ตัด chain PAPER ออกก่อนเลือก chain ล่าสุด; หน้า PAPER นับทุก chain
+
+    คืน ``{"total", "items", "older", "paper", "text"}``: ``total`` None = ไม่มี chain ให้นับ หรือมี Eₙ
+    ที่อ่านไม่ได้ (fail closed) · ``items`` = chain ที่นับ (symbol, chain_key, excess, dna_step) เรียงตามหุ้น ·
+    ``older`` / ``paper`` = chain ที่ไม่นับ · ``text`` = ที่มาของผลรวม (Markdown) สำหรับ help ของ metric
+    """
+    excess_col = LEDGER_COLS[3]
+    chains = sorted(df["chain_key"].dropna().unique()) if "chain_key" in df.columns else []
+    groups = ([(ck, df[df["chain_key"] == ck]) for ck in chains] if len(chains) > 1
+              else [(chains[0] if chains else None, df)])
+    by_symbol: dict[str, list] = {}
+    paper: list = []
+    for ck, rows in groups:
+        if rows.empty:
+            continue
+        entry = _state_entry(state, ck)
+        if not paper_page and _is_paper_chain(entry, rows):
+            paper.append(ck)
+            continue
+        last = rows.iloc[-1]
+        by_symbol.setdefault(_chain_symbol(last, entry, ck), []).append(
+            (_chain_updated_at(entry, last), str(ck), ck, rows))
+
+    items: list[dict] = []
+    older: list = []
+    for symbol in sorted(by_symbol):
+        *stale, (_, _, ck, rows) = sorted(by_symbol[symbol], key=lambda c: (c[0], c[1]))
+        older += [c[2] for c in stale]
+        shown = recompute_gated_ledger(rows, p0=chain_p0_hint(state, ck), genesis_baseline=True)
+        latest = shown.iloc[-1]
+        # metric ของ chain: float(latest.get(Eₙ, 0)) — ไม่มีคอลัมน์ = 0.00; NaN/อ่านไม่ได้ = None (ไม่รวม)
+        excess = _meta_num(latest, excess_col) if excess_col in shown.columns else 0.0
+        items.append({"symbol": symbol, "chain_key": ck, "excess": excess,
+                      "dna_step": _meta_num(latest, "DNA step")})
+
+    readable = bool(items) and all(item["excess"] is not None for item in items)
+    total = math.fsum(item["excess"] for item in items) if readable else None
+
+    lines = ['ผลบวก Eₙ (แถวล่าสุด) ของ chain ล่าสุดของแต่ละหุ้น — Eₙ แต่ละตัวคือค่าที่ metric '
+             '"Eₙ สะสม (USD)" แสดงเมื่อเลือก chain นั้น', ""]
+    if not items:
+        lines.append("ไม่มี chain ที่นับได้")
+    for item in items:
+        value = "อ่านไม่ได้ จึงไม่รวม" if item["excess"] is None else _f(item["excess"])
+        step = "" if item["dna_step"] is None else f" · DNA step {int(item['dna_step'])}"
+        lines.append(f"- **{_md_text(item['symbol'])}**: {value} · chain "
+                     f"{_md_code(item['chain_key'])}{step}")
+    if total is not None:
+        terms = [_f(items[0]["excess"])] + [_op(item["excess"]) for item in items[1:]]
+        equation = (f"รวม = {' + '.join(terms)} = {_f(total)}" if len(items) > 1
+                    else f"รวม = {_f(total)}")
+        lines += ["", equation + " (metric ปัด 2 ตำแหน่ง)"]
+    elif items:
+        lines += ["", "ไม่แสดงผลรวม — มี Eₙ ที่อ่านไม่ได้"]
+    skipped = ([f"- chain เก่า {_md_code(ck)} — หุ้นเดียวกันมี chain ที่ใหม่กว่า" for ck in older]
+               + [f"- chain PAPER {_md_code(ck)} — หน้า PROD ไม่นับ chain PAPER" for ck in paper])
+    if skipped:
+        lines += ["", "ไม่นับ:", *skipped]
+    lines += ["", "chain ล่าสุดของหุ้น = chain ที่ `updated_at` ใน state pointer ล่าสุด"]
+    return {"total": total, "items": items, "older": older, "paper": paper,
+            "text": "\n".join(lines)}
 
 
 # ============================================================================
