@@ -56,3 +56,23 @@ What changed and what did not:
 
 The root cause is upstream: the backend should treat the first fill of such chains as funding and the stored
 rows need the reviewed offline reconciliation. Once ΔA₀ is 0 in the database the rebase is a no-op.
+
+## Addendum 2026-11-07: the act after genesis is measured from P₀
+
+Commit 40d191e changed the display rule above. The first act after a genesis fill is now measured from P₀, not
+from the genesis fill price (previous_action_price := P₀, previous_actual_cumulative := 0). A chain whose first
+row is a fill therefore shows the same Rₙ, ΔAₙ, Aₙ and Eₙ as a chain whose first row is a PASS at P₀ with no fill.
+The owner chose this behaviour on 2026-11-07, pointing at chains that start with no fill.
+
+This supersedes "the fill price seeds the next P_acted" and "later fills keep their own ΔA" above:
+
+- the first act after genesis gets ΔA′ = FIX_C × (fill / P₀ − 1);
+- A and E after it move by (ΔA₀ + ΔA_stored) − ΔA′;
+- fills after it keep their own ΔA.
+
+It is still display only, and `integrity_report` still reads the stored rows.
+
+This is not what `initial_funding_zero_v1` does for a flat account. In `fixtures/paper_session.json` the act
+after the funding fill (65.51) is measured from the fill price (previous_action_price = 65.51, P₀ = 65.49). If
+the backend starts marking such a first fill as funding, the rebase switches off, and the next act is measured
+from the fill price again unless the backend also uses P₀.
