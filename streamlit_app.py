@@ -2,7 +2,9 @@
 
 4 แท็บ:
   📊 Live Dashboard   — อ่าน committed rows จาก Firebase (เหมือนเดิม), กรอง
-                        committed==True, เลือก chain, ตาราง 17 คอลัมน์, integrity E1–E8
+                        committed==True, เลือก chain, ตาราง 17 คอลัมน์, integrity E1–E8,
+                        ตัวกรองวัน (UTC) ของกราฟ/ตาราง/Order audit (ค่าเริ่มต้น = วันล่าสุด)
+                        และ metric Eₙ สะสม ผลรวมทุกตัว (หุ้นละ 1 chain ล่าสุด)
   🎓 Rebalancing 101  — playground เชิงสอน "gated demo (DNA gate + บัญชีแบบแช่แข็ง)"
                         ไม่ต้องมี Firebase: สุ่มราคา -> เดิน ledger gated_theoretical_v2
                         เห็นว่ารอบ "จำนวนสั่ง = 0" (pass/แช่แข็ง) ถูกบันทึกอย่างไร
@@ -49,19 +51,25 @@ _REQUIRED_DASH_CORE_API = (
     "table_tooltips",
     "leaps_summary",
     "genesis_baseline_info",
+    "ALL_DAYS",
+    "ledger_day_choices",
+    "ledger_day_rows",
+    "excess_total_by_stock",
 )
 if any(not hasattr(_lego_dash_core, name) for name in _REQUIRED_DASH_CORE_API):
     _lego_dash_core = importlib.reload(_lego_dash_core)
 
-from lego_dash_core import (DEFAULT_GATED_DNA, EXECUTION_CONFIRMED_SEMANTICS,
+from lego_dash_core import (ALL_DAYS, DEFAULT_GATED_DNA, EXECUTION_CONFIRMED_SEMANTICS,
                             EXECUTION_TERMINAL_FROZEN_V2, HOLDINGS_COL,
                             MAX_REBALANCING_STEPS, MONEY_COLS,
                             audit_with_ledger_time, build_gate_actions,
                             count_ledger_corrections,
-                            default_chain_index, filter_audit_rows,
+                            default_chain_index, excess_total_by_stock,
+                            filter_audit_rows,
                             gated_rebalancing_cashflow_from_prices,
                             genesis_baseline_info,
                             integrity_report, leaps_summary,
+                            ledger_day_choices, ledger_day_rows,
                             order_columns, pending_broker_fee_count,
                             rebalancing_cashflow_from_prices,
                             recompute_gated_ledger, rows_to_df,
@@ -149,12 +157,17 @@ def load_rows(paper: bool = False) -> pd.DataFrame:
 
 
 def render_ledger_table(show: pd.DataFrame, persisted_df: pd.DataFrame,
-                        p0_hint: float | None) -> None:
+                        p0_hint: float | None, rows: list[int] | None = None) -> None:
     """ตาราง 17 คอลัมน์: โหมดชี้เมาส์ดูที่มาของ Rₙ/ΔAₙ/Aₙ/Eₙ (default) หรือ st.dataframe เรียงได้
 
     ข้อความที่มามาจาก trace ของ recompute_gated_ledger บนข้อมูลชุดเดียวกับที่ตารางแสดง
     (persisted_df) จึงเรียงแถวตรงกับ ``show`` และตัวเลขที่แทนค่าคือชุดที่คำนวณจริง
+
+    ``rows`` = ตำแหน่งแถวของวันที่เลือก (``ledger_day_rows``; None = ทุกแถว) — ledger และ tooltip
+    คำนวณจากทั้ง chain แล้วจึงตัดด้วยตำแหน่งชุดเดียวกัน ตัวเลขของวันนั้นจึงสะสมต่อจากวันก่อน
     """
+    rows = list(range(len(show))) if rows is None else list(rows)
+    visible = show.iloc[rows].reset_index(drop=True)
     hover = st.toggle("🖱️ ชี้เมาส์ที่ตัวเลข Rₙ / ΔAₙ / Aₙ / Eₙ เพื่อดูที่มา", value=True,
                       key="live_hover_table",
                       help="ปิดเพื่อใช้ตารางแบบเรียง/กรองได้ (st.dataframe) — แต่ไม่มี tooltip ที่มา")
@@ -164,10 +177,15 @@ def render_ledger_table(show: pd.DataFrame, persisted_df: pd.DataFrame,
             # ไม่มี LEAPS เลยก็ได้ tooltip/คอลัมน์ชุดเดิมทุกตัวอักษร
             # genesis_baseline=True ต้องตรงกับที่ใช้คำนวณ ``show`` (แถว n = 0 เริ่มจาก 0)
             tips, tip_cols = table_tooltips(persisted_df, p0=p0_hint, genesis_baseline=True)
+            if len(tips) != len(show):
+                raise ValueError(f"tooltip {len(tips)} แถว ไม่ตรงกับตาราง {len(show)} แถว")
+            tips = [tips[i] for i in rows]
+            if HOLDINGS_COL in tip_cols and not any(tip.get(HOLDINGS_COL) for tip in tips):
+                tip_cols = [col for col in tip_cols if col != HOLDINGS_COL]   # วันนี้ไม่มีแถว LEAPS
             theme = getattr(getattr(st.context, "theme", None), "type", None)
             components.html(
-                build_hover_table_html(show, tips, tip_cols, MONEY_COLS, theme=theme),
-                height=hover_table_height(len(show)))
+                build_hover_table_html(visible, tips, tip_cols, MONEY_COLS, theme=theme),
+                height=hover_table_height(len(visible)))
             st.caption("ชี้เมาส์ (หรือกด Tab) ที่ตัวเลขคอลัมน์ Rₙ · ΔAₙ · Aₙ · Eₙ"
                        + (" · จำนวนถือครอง (หุ้นจริง + LEAPS)" if HOLDINGS_COL in tip_cols
                           else "")
@@ -177,7 +195,60 @@ def render_ledger_table(show: pd.DataFrame, persisted_df: pd.DataFrame,
         except Exception as exc:   # tooltip เป็นส่วนเสริม — ห้ามทำให้ตารางหลักล่ม
             st.warning(f"สร้างตารางแบบชี้เมาส์ไม่ได้ ({type(exc).__name__}: {exc}) "
                        "— แสดงตารางปกติแทน")
-    st.dataframe(style_status_rows(show, MONEY_COLS), width="stretch")
+    st.dataframe(style_status_rows(visible, MONEY_COLS), width="stretch")
+
+
+def render_day_filter(df: pd.DataFrame) -> tuple[str, list[int]]:
+    """selectbox "วัน (UTC)" ของกราฟ · ตาราง 17 คอลัมน์ · Order audit — ค่าเริ่มต้น = วันล่าสุด
+
+    คืน (วันที่เลือก, ตำแหน่งแถวของวันนั้นใน ``df``). ``df`` คือ ledger ที่คำนวณจากทั้ง chain แล้ว
+    ตัวกรองจึงเลือกแค่แถวที่แสดง ไม่เปลี่ยนตัวเลข. ไม่ใส่ key: id ของ widget มาจาก label + options
+    จึงกลับไปวันล่าสุดเองเมื่อชุดวันเปลี่ยน (มีวันใหม่ / เปลี่ยน chain) แต่จำวันที่เลือกระหว่าง rerun ปกติ
+    """
+    days = ledger_day_choices(df)
+    if not days:                          # อ่านเวลาไม่ได้เลย -> แสดงทุกแถวแบบเดิม
+        return ALL_DAYS, ledger_day_rows(df, ALL_DAYS)
+    pick, note = st.columns([1, 3], vertical_alignment="bottom")
+    day = pick.selectbox(
+        "วัน (UTC)", [*days, ALL_DAYS], index=0,               # index 0 = วันล่าสุด
+        format_func=lambda d: f"{d} (ล่าสุด)" if d == days[0] else d,
+        help="วันตามปฏิทิน UTC เดียวกับคอลัมน์ เวลา (UTC) — ตลาดสหรัฐฯ 1 รอบอยู่ในวันเดียว · "
+             "ค่าเริ่มต้น = วันล่าสุด")
+    rows = ledger_day_rows(df, day)
+    scope = "ทั้ง chain" if day == ALL_DAYS else f"วัน {day}"
+    note.caption(f"แสดง {len(rows)} จาก {len(df)} แถว ({scope}) · กราฟ ตาราง 17 คอลัมน์ และ "
+                 "Order audit แสดงตามวันที่เลือก · Aₙ/Eₙ เป็นยอดสะสมของทั้ง chain (ไม่เริ่มใหม่ทุกวัน) · "
+                 "metric และ Integrity check ใช้ทั้ง chain")
+    return day, rows
+
+
+EXCESS_TOTAL_LABEL = "Eₙ สะสม (USD) ผลรวมทุกตัว"
+
+
+def render_excess_total(column, rows: pd.DataFrame, state, paper: bool) -> None:
+    """metric "Eₙ สะสม (USD) ผลรวมทุกตัว" — หุ้นละ 1 chain ล่าสุด (``excess_total_by_stock``)
+
+    ``rows`` คือแถวของทุก chain (ก่อนเลือก chain) จึงไม่เปลี่ยนตาม Chain/วัน ที่เลือก;
+    หน้า PROD ไม่นับ chain ที่ backend ตีตรา paper (เงินจำลอง)
+    """
+    summary = excess_total_by_stock(rows, state, include_paper=paper)
+    total, parts = summary["total"], summary["parts"]
+    terms = " + ".join(f"{part['asset']} {part['excess']:.2f}" for part in parts)
+    used = ", ".join(f"`{part['chain_key']}`" for part in parts if part["chain_key"] is not None)
+    column.metric(
+        EXCESS_TOTAL_LABEL, f"{total:.2f}",
+        help=(f"{terms or 'ไม่มี chain'} = {total:.2f}\n\n"
+              "Eₙ แถวล่าสุดของ chain ล่าสุดของแต่ละหุ้น (ตาม state.updated_at) คำนวณแบบเดียวกับ "
+              "metric รายตัว · chain ของ config เก่าไม่นับ" + (f" · ใช้ {used}" if used else "")))
+    notes = []
+    if summary["paper"]:
+        notes.append("ไม่รวม chain PAPER (เงินจำลอง): "
+                     + ", ".join(f"`{ck}`" for ck in summary["paper"]))
+    if summary["failed"]:
+        notes.append("ไม่รวม chain ที่คำนวณ Eₙ ไม่ได้: "
+                     + ", ".join(f"`{ck}`" for ck in summary["failed"]))
+    if notes:
+        st.caption(f"{EXCESS_TOTAL_LABEL} — " + " · ".join(notes))
 
 
 def render_live_dashboard(paper: bool = False) -> None:
@@ -207,6 +278,7 @@ def render_live_dashboard(paper: bool = False) -> None:
         st.info("ยังไม่มีแถว committed — รอ Cloud Function รอบแรก")
         return
 
+    all_rows = df          # ทุก chain (ก่อนเลือก) — ใช้รวม Eₙ สะสม ผลรวมทุกตัว
     # เลือก chain ก่อน — กัน step ซ้ำข้าม chain ปนกราฟ
     chains = sorted(df["chain_key"].dropna().unique()) if "chain_key" in df else []
     if len(chains) > 1:
@@ -273,12 +345,14 @@ def render_live_dashboard(paper: bool = False) -> None:
             "Integrity check ด้านล่างยังตรวจค่าที่ DB บันทึกจริง")
 
     latest = df.iloc[-1]
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("สถานะตัดสินใจล่าสุด" if execution_mode else "สถานะล่าสุด",
               latest.get("สถานะ", "—"))
     c2.metric("DNA step", int(latest.get("DNA step", 0)))
     c3.metric("Pₙ (USD)", f"{float(latest.get('ราคา Pₙ (USD)', 0)):.2f}")
-    c4.metric("Eₙ สะสม (USD)", f"{float(latest.get('Eₙ ส่วนเกินสะสม (USD)', 0)):.2f}")
+    c4.metric("Eₙ สะสม (USD)", f"{float(latest.get('Eₙ ส่วนเกินสะสม (USD)', 0)):.2f}",
+              help="Eₙ แถวล่าสุดของ chain ที่เลือก (รายตัว)")
+    render_excess_total(c5, all_rows, state, paper)
     if frozen_v2_mode and latest.get("E_mark_at_observation") is not None:
         st.caption(
             f"E_mark ล่าสุด: {float(latest['E_mark_at_observation']):.2f} USD · "
@@ -289,6 +363,11 @@ def render_live_dashboard(paper: bool = False) -> None:
             f"Execution cashflow ล่าสุด: {latest.get('cashflow_status', '—')} · "
             "READY_BUY/READY_SELL คือ decision intent ไม่ใช่หลักฐานว่า fill แล้ว"
         )
+
+    # metric ด้านบน = แถวล่าสุดของทั้ง chain; ตัวกรองวันมีผลกับกราฟ · ตาราง 17 คอลัมน์ · Order audit
+    day, rows = render_day_filter(df)
+
+    if execution_mode:
         st.subheader("Recurrence: Rₙ (อ้างอิง) vs Aₙ (execution-confirmed) vs Eₙ (smooth)")
         st.caption(
             "execution_confirmed_v1: act เฉพาะ cashflow_status=FINALIZED ที่มี "
@@ -302,7 +381,7 @@ def render_live_dashboard(paper: bool = False) -> None:
             "เทียบราคาแถว act ล่าสุด · แถว pass (ไม่เทรด — PASS_DNA_ZERO หรือ PASS_THRESHOLD, "
             "จำนวนสั่ง = 0) ΔAₙ = 0, Aₙ ค้าง, Eₙ ค้างค่า act ล่าสุด (smooth) — Eₙ ไม่ลดและ ≥ 0 เสมอ"
         )
-    chart_df = df.set_index("DNA step")[[
+    chart_df = df.iloc[rows].set_index("DNA step")[[
         "Rₙ อ้างอิง (USD)", "Aₙ สะสม (USD)", "Eₙ ส่วนเกินสะสม (USD)"]].astype(float)
     st.line_chart(chart_df)
 
@@ -317,7 +396,7 @@ def render_live_dashboard(paper: bool = False) -> None:
     for col in MONEY_COLS:
         if col in show:
             show[col] = show[col].astype(float).round(2)
-    render_ledger_table(show, persisted_df, p0_hint)
+    render_ledger_table(show, persisted_df, p0_hint, rows)
 
     # Audit the persisted evidence, before any display-only recomputation.
     with st.expander("🔎 Integrity check — สมการ LEGO (E1–E8)", expanded=False):
@@ -331,20 +410,29 @@ def render_live_dashboard(paper: bool = False) -> None:
     # audit เฉพาะ chain ที่เลือก — ผูกด้วย run_id กัน order ข้าม chain ปนตาราง
     audit = _ref(AUDIT_PATH, paper).get() or {}
     if audit:
-        run_ids = df["run_id"] if "run_id" in df.columns else []
-        adf = filter_audit_rows(audit, run_ids)
-        if not adf.empty:
-            adf = audit_with_ledger_time(adf, df)
+        has_run_id = "run_id" in df.columns
+        chain_adf = filter_audit_rows(audit, df["run_id"] if has_run_id else [])
+        if not chain_adf.empty:
             st.subheader("Order audit (redacted)")
-            pending_fees = pending_broker_fee_count(adf)
+            # นับจาก audit ทั้ง chain: คำเตือน money fence ต้องไม่หายเพราะตัวกรองวัน
+            pending_fees = pending_broker_fee_count(chain_adf)
             if pending_fees:
                 st.warning(
                     f"มี {pending_fees} fill ที่ broker fee ยังเป็น PENDING — "
                     "ระบบไม่ถือเป็นศูนย์และยังไม่ปลด money fence จนกว่าจะกระทบยอด")
-            diagnostic_columns = [name for name in ("เวลา (UTC)", "run_id", "status", "reject_reason",
-                                  "terminal_reason", "filled_quantity", "broker_fee_status") if name in adf]
-            st.dataframe(adf[diagnostic_columns + [name for name in adf if name not in diagnostic_columns]],
-                         width="stretch")
+            adf = chain_adf
+            if day != ALL_DAYS:          # order ของวันที่เลือก = run_id ของแถว ledger วันนั้น
+                adf = filter_audit_rows(audit, df["run_id"].iloc[rows] if has_run_id else [])
+            if adf.empty:
+                st.caption(f"วัน {day} (UTC) ไม่มี order ของ chain นี้")
+            else:
+                adf = audit_with_ledger_time(adf, df)
+                diagnostic_columns = [name for name in ("เวลา (UTC)", "run_id", "status", "reject_reason",
+                                      "terminal_reason", "filled_quantity", "broker_fee_status")
+                                      if name in adf]
+                st.dataframe(adf[diagnostic_columns
+                                 + [name for name in adf if name not in diagnostic_columns]],
+                             width="stretch")
 
 
 def render_rebalancing_101() -> None:
