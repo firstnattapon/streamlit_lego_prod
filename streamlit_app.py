@@ -50,6 +50,8 @@ _REQUIRED_DASH_CORE_API = (
     "HOLDINGS_COL",
     "table_tooltips",
     "leaps_summary",
+    # หน้าไม่เรียกฟังก์ชันนี้แล้ว (ปิดป้ายแจ้ง) แต่ยังเป็นตัวบอกว่า core รองรับ genesis_baseline=True
+    # ที่ recompute_gated_ledger/table_tooltips ถูกเรียกด้านล่าง — core เก่ากว่านั้นต้องถูกโหลดใหม่
     "genesis_baseline_info",
     "ALL_DAYS",
     "day_options",
@@ -68,7 +70,6 @@ from lego_dash_core import (ALL_DAYS, DEFAULT_GATED_DNA, EXECUTION_CONFIRMED_SEM
                             day_options, day_positions,
                             default_chain_index, filter_audit_rows,
                             gated_rebalancing_cashflow_from_prices,
-                            genesis_baseline_info,
                             integrity_report, latest_excess_total, leaps_summary,
                             order_columns, pending_broker_fee_count,
                             rebalancing_cashflow_from_prices,
@@ -314,18 +315,8 @@ def render_live_dashboard(paper: bool = False) -> None:
 
     # n = 0 เป็นจุดตั้งต้น (R₀ = ΔA₀ = A₀ = E₀ = 0): fill แรกของ chain ไม่ book slippage (quote → fill) เป็นกำไร.
     # ส่วนนี้เป็นการ "แสดง" เท่านั้น — ไม่แก้ DB; ค่าที่ DB บันทึกยังอยู่ใน persisted_df (tooltip + Integrity check)
-    baseline = genesis_baseline_info(persisted_df, p0=p0_hint)
+    # ไม่มีป้ายแจ้งบนหน้า (เจ้าของขอปิด): ค่าที่ DB บันทึกและจำนวนที่ปรับดูได้จาก tooltip ของตาราง
     df = recompute_gated_ledger(persisted_df, p0=p0_hint, genesis_baseline=True)
-    if baseline:
-        step = baseline.get("dna_step")
-        where = "" if step is None else f" · DNA step {int(step)}"
-        st.info(
-            f"ℹ️ แถวแรกของ chain (n = 0{where}) ถูกบันทึกใน DB ด้วย "
-            f"ΔA₀ = {baseline['shift']:,.4f} — fill {baseline['p_fill']:,.4f} เทียบ quote "
-            f"{baseline['p_quote']:,.4f} ถูกนับเป็นกำไร · ตาราง/กราฟ/ตัวเลขด้านล่างแสดงแบบเริ่มจาก 0: "
-            f"ΔA₀ = FIX_C × (P₀ / P₀ − 1) = 0 และหัก {baseline['shift']:,.4f} ออกจาก Aₙ/Eₙ ของแถวถัดไป "
-            "(ไม่แก้ DB · ชี้เมาส์ที่ตัวเลขเพื่อดูค่าที่ DB บันทึก) · "
-            "Integrity check ด้านล่างยังตรวจค่าที่ DB บันทึกจริง")
 
     latest = df.iloc[-1]
     c1, c2, c3, c4, c5 = st.columns(5)

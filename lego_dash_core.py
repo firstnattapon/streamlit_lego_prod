@@ -700,10 +700,11 @@ def _genesis_baseline_context(df: pd.DataFrame, p0: float | None) -> dict | None
 
 
 def genesis_baseline_info(df: pd.DataFrame, p0: float | None = None) -> dict | None:
-    """ข้อมูลสำหรับป้ายแจ้งบนหน้า: DB บันทึก ΔA₀ = ``shift`` จาก slippage ของ fill แรก (None = ไม่มี)
+    """DB บันทึก ΔA₀ = ``shift`` จาก slippage ของ fill แรกไว้หรือไม่ (None = ไม่มี)
 
     ``shift`` ค่า ΔA₀ ที่ DB บันทึก · ``p_quote``/``p_fill`` ราคาตัดสินใจ/ราคา fill · ``fix_c`` ·
-    ``dna_step`` ของแถวแรก. อ่านแถวดิบของ chain เดียว (เรียง version แล้ว); read-only
+    ``dna_step`` ของแถวแรก. อ่านแถวดิบของ chain เดียว (เรียง version แล้ว); read-only.
+    หน้า Live Dashboard ไม่แสดงป้ายแจ้งจากค่านี้แล้ว (เจ้าของขอปิด) — ค่าที่ DB บันทึกอยู่ใน tooltip
     """
     return _genesis_baseline_context(df, p0)
 
