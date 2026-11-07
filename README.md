@@ -66,6 +66,7 @@ FIREBASE_DB_URL_PAPER = "https://lego-firebase-paper.asia-southeast1.firebasedat
   `tools/render_cheat_sheet.py` สร้างภาพใหม่ (รายละเอียดด้านล่าง)
 - `lego_dash_core.py` — การจัดตาราง ตรวจ integrity และคำนวณ ledger สำหรับการแสดงผล
 - `lego_hover_table.py` — ตาราง HTML ที่ชี้เมาส์ดูที่มาของตัวเลขได้ (ฝังด้วย `components.html`)
+- `lego_charts.py` — กราฟ Plotly ทั้งหมด (pure ไม่ import streamlit จึง test ได้ตรง ๆ — `test_charts.py`)
 - `dna_engine.py` — ตัวถอด DNA แบบเดียวกับ backend
 - `requirements.txt` — dependency ที่ pin แล้ว
 - `docs/` — คู่มือและแผนการเรียนรู้เพิ่มเติม
@@ -157,6 +158,22 @@ chain ที่ bot ใช้ LEAPS: คอลัมน์ 7 "จำนวนถ
 - หน้า PROD ไม่นับ chain PAPER (state pointer หรือแถวมี `paper = true`) ส่วนหน้า PAPER นับทุก chain ในฐานข้อมูล paper
 - ชี้เมาส์ที่ไอคอน ? ข้างชื่อ metric เพื่อดูรายการแต่ละหุ้น สมการผลรวม และ chain ที่ไม่นับ
 - ไม่มี chain ให้นับ หรือมี Eₙ ที่อ่านไม่ได้ จะแสดง "—"
+
+**กราฟ "📈 Eₙ ผลรวมทุกตัว ตามเวลา"**: อยู่เหนือตัวเลือก Chain (`excess_total_timeline`)
+
+- นับ chain ชุดเดียวกับ metric ผลรวม (ใช้ `_counted_chains` ร่วมกัน) และ Eₙ จากสูตรเดียวกัน ค่าปลายกราฟจึงเท่ากับ metric
+- เส้นหนาคือผลรวม เส้นบางคือ Eₙ ของแต่ละหุ้น แกน x เป็นเวลา (UTC) มีปุ่ม 1D / 1W / 1M / ทั้งหมด และตาราง Eₙ ล่าสุดรายหุ้นใน expander
+- Eₙ เป็นค่าสะสมอยู่แล้ว: ผลรวม ณ เวลา t = ผลบวก Eₙ ล่าสุดของแต่ละ chain ที่ ≤ t (ไม่ cumsum ซ้ำ) ก่อนแถวแรกของ chain นับเป็น 0
+- ไม่ขึ้นกับตัวกรองวัน แถวที่เวลาอ่านไม่ได้ไม่อยู่ในกราฟนี้
+
+## กราฟ (Plotly)
+
+กราฟทุกจุดสร้างจาก `lego_charts.py` แสดงด้วย `st.plotly_chart(theme=None)` สีเลือกแยกสำหรับธีม light/dark
+(ตามธีม Streamlit) ชี้เมาส์เห็นค่าทุกเส้น ณ จุดเดียวกันเป็น USD ลากเพื่อซูม ดับเบิลคลิกเพื่อรีเซ็ต และกดปุ่มกล้องเพื่อบันทึก PNG
+
+- **Rₙ / Aₙ / Eₙ** (Live Dashboard ตามตัวกรองวัน และ Rebalancing 101): Rₙ เป็นเส้นประอ้างอิง, Aₙ มีจุดที่แถว act
+  (Live: ΔAₙ ≠ 0, 101: gate 1; ซ่อนจุดเมื่อมี act เกิน 150 รอบ), Eₙ มีพื้นที่ใต้เส้น และมี label ค่าล่าสุดที่ปลายเส้น
+- หุ้นเกิน 8 ตัวในกราฟผลรวม ตัวที่ |Eₙ| เล็กสุดถูกรวมเป็น "อื่น ๆ"
 
 ## เชื่อม Firebase สำหรับ Live Dashboard
 

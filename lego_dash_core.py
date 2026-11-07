@@ -1589,22 +1589,15 @@ def _is_paper_chain(entry: dict, rows: pd.DataFrame) -> bool:
     return "paper" in rows.columns and bool(rows["paper"].eq(True).any())
 
 
-def latest_excess_total(df: pd.DataFrame, state: dict | None, *,
-                        paper_page: bool = False) -> dict:
-    """metric "Eₙ สะสม (USD) ผลรวมทุกตัว": ผลบวก Eₙ ของ chain ล่าสุดของแต่ละหุ้น (read-only)
+def _counted_chains(df: pd.DataFrame, state: dict | None, *,
+                    paper_page: bool = False) -> tuple[list, list, list]:
+    """chain ที่ผลรวม Eₙ นับ — ใช้ร่วมกันระหว่าง metric (``latest_excess_total``) และกราฟ
+    (``excess_total_timeline``) จึงนับ chain ชุดเดียวกันเสมอ
 
-    - Eₙ ของแต่ละ chain = ค่าที่ metric "Eₙ สะสม (USD)" แสดงเมื่อเลือก chain นั้น: แบ่งแถวแบบเดียวกับหน้าเว็บ
-      (หลาย chain กรองด้วย chain_key, chain เดียว/ไม่มี key ใช้ทั้ง frame) แล้ว
-      ``recompute_gated_ledger(..., genesis_baseline=True)`` ด้วย P₀ จาก ``chain_p0_hint`` — ไม่มีสูตรใหม่
-    - หุ้นของ chain = "สินทรัพย์" ของแถวล่าสุด (ไม่มี -> state.symbol -> chain_key)
-    - chain ล่าสุดของหุ้น = state.updated_at ล่าสุด (ไม่มี -> "เวลา (UTC)" ของแถวล่าสุด; เท่ากัน -> chain_key)
-    - หน้า PROD (``paper_page=False``) ตัด chain PAPER ออกก่อนเลือก chain ล่าสุด; หน้า PAPER นับทุก chain
-
-    คืน ``{"total", "items", "older", "paper", "text"}``: ``total`` None = ไม่มี chain ให้นับ หรือมี Eₙ
-    ที่อ่านไม่ได้ (fail closed) · ``items`` = chain ที่นับ (symbol, chain_key, excess, dna_step) เรียงตามหุ้น ·
-    ``older`` / ``paper`` = chain ที่ไม่นับ · ``text`` = ที่มาของผลรวม (Markdown) สำหรับ help ของ metric
+    คืน ``(counted, older, paper)``: ``counted`` = ``[(symbol, chain_key, rows)]`` ของ chain ล่าสุดของแต่ละหุ้น
+    เรียงตามหุ้น · ``older`` = chain เก่าของหุ้นเดียวกัน · ``paper`` = chain PAPER ที่หน้า PROD ไม่นับ
+    (กติกาเต็มอยู่ใน docstring ของ ``latest_excess_total``)
     """
-    excess_col = LEDGER_COLS[3]
     chains = sorted(df["chain_key"].dropna().unique()) if "chain_key" in df.columns else []
     groups = ([(ck, df[df["chain_key"] == ck]) for ck in chains] if len(chains) > 1
               else [(chains[0] if chains else None, df)])
@@ -1621,11 +1614,34 @@ def latest_excess_total(df: pd.DataFrame, state: dict | None, *,
         by_symbol.setdefault(_chain_symbol(last, entry, ck), []).append(
             (_chain_updated_at(entry, last), str(ck), ck, rows))
 
-    items: list[dict] = []
+    counted: list = []
     older: list = []
     for symbol in sorted(by_symbol):
         *stale, (_, _, ck, rows) = sorted(by_symbol[symbol], key=lambda c: (c[0], c[1]))
         older += [c[2] for c in stale]
+        counted.append((symbol, ck, rows))
+    return counted, older, paper
+
+
+def latest_excess_total(df: pd.DataFrame, state: dict | None, *,
+                        paper_page: bool = False) -> dict:
+    """metric "Eₙ สะสม (USD) ผลรวมทุกตัว": ผลบวก Eₙ ของ chain ล่าสุดของแต่ละหุ้น (read-only)
+
+    - Eₙ ของแต่ละ chain = ค่าที่ metric "Eₙ สะสม (USD)" แสดงเมื่อเลือก chain นั้น: แบ่งแถวแบบเดียวกับหน้าเว็บ
+      (หลาย chain กรองด้วย chain_key, chain เดียว/ไม่มี key ใช้ทั้ง frame) แล้ว
+      ``recompute_gated_ledger(..., genesis_baseline=True)`` ด้วย P₀ จาก ``chain_p0_hint`` — ไม่มีสูตรใหม่
+    - หุ้นของ chain = "สินทรัพย์" ของแถวล่าสุด (ไม่มี -> state.symbol -> chain_key)
+    - chain ล่าสุดของหุ้น = state.updated_at ล่าสุด (ไม่มี -> "เวลา (UTC)" ของแถวล่าสุด; เท่ากัน -> chain_key)
+    - หน้า PROD (``paper_page=False``) ตัด chain PAPER ออกก่อนเลือก chain ล่าสุด; หน้า PAPER นับทุก chain
+
+    คืน ``{"total", "items", "older", "paper", "text"}``: ``total`` None = ไม่มี chain ให้นับ หรือมี Eₙ
+    ที่อ่านไม่ได้ (fail closed) · ``items`` = chain ที่นับ (symbol, chain_key, excess, dna_step) เรียงตามหุ้น ·
+    ``older`` / ``paper`` = chain ที่ไม่นับ · ``text`` = ที่มาของผลรวม (Markdown) สำหรับ help ของ metric
+    """
+    excess_col = LEDGER_COLS[3]
+    counted, older, paper = _counted_chains(df, state, paper_page=paper_page)
+    items: list[dict] = []
+    for symbol, ck, rows in counted:
         shown = recompute_gated_ledger(rows, p0=chain_p0_hint(state, ck), genesis_baseline=True)
         latest = shown.iloc[-1]
         # metric ของ chain: float(latest.get(Eₙ, 0)) — ไม่มีคอลัมน์ = 0.00; NaN/อ่านไม่ได้ = None (ไม่รวม)
@@ -1659,6 +1675,51 @@ def latest_excess_total(df: pd.DataFrame, state: dict | None, *,
     lines += ["", "chain ล่าสุดของหุ้น = chain ที่ `updated_at` ใน state pointer ล่าสุด"]
     return {"total": total, "items": items, "older": older, "paper": paper,
             "text": "\n".join(lines)}
+
+
+TOTAL_EXCESS_COL = "รวม"            # ต้องตรงกับ lego_charts.TOTAL_COL
+
+
+def excess_total_timeline(df: pd.DataFrame, state: dict | None, *,
+                          paper_page: bool = False) -> pd.DataFrame:
+    """กราฟ "Eₙ ผลรวมทุกตัว ตามเวลา": Eₙ ของ chain ที่ metric ผลรวมนับ ตามเวลา (UTC) + ยอดรวม
+
+    คืน DataFrame: index = เวลา (UTC, tz-aware, เก่าไปใหม่), คอลัมน์ = หุ้น (เรียงชื่อ) + ``"รวม"``;
+    ไม่มีข้อมูลที่ใช้ได้ -> DataFrame ว่าง
+
+    - chain ที่นับ = ``_counted_chains`` ชุดเดียวกับ ``latest_excess_total`` (chain ล่าสุดของแต่ละหุ้น,
+      หน้า PROD ไม่นับ chain PAPER) และ Eₙ = ``recompute_gated_ledger(..., genesis_baseline=True)`` ด้วย P₀
+      จาก ``chain_p0_hint`` — สูตรเดียวกับ metric ทุกตัว ค่าปลายกราฟจึงเท่ากับ metric ผลรวม
+      (เมื่อแถวล่าสุดของทุก chain มีเวลาที่อ่านได้)
+    - Eₙ เป็นค่าสะสมอยู่แล้ว: ยอดรวม ณ t = ผลบวก Eₙ ล่าสุดของแต่ละ chain ที่ ≤ t (ไม่ cumsum ซ้ำ);
+      ก่อนแถวแรกของ chain = 0
+    - เวลาอ่านแบบ ``utc_days`` (เฉพาะค่า str, ``format="mixed"``); แถวที่เวลาหรือ Eₙ อ่านไม่ได้ถูกตัดออก
+      จากกราฟนี้เท่านั้น · เวลาซ้ำใน chain เดียวใช้แถวหลังสุด
+    """
+    excess_col, time_col = LEDGER_COLS[3], COLUMN_ORDER[0]
+    if df.empty or time_col not in df.columns:
+        return pd.DataFrame()
+    series: dict[str, pd.Series] = {}
+    for symbol, ck, rows in _counted_chains(df, state, paper_page=paper_page)[0]:
+        shown = recompute_gated_ledger(rows, p0=chain_p0_hint(state, ck), genesis_baseline=True)
+        if excess_col not in shown.columns:
+            continue
+        raw = shown[time_col]
+        text = raw.where(raw.map(lambda value: isinstance(value, str)), None)
+        stamps = pd.to_datetime(text, utc=True, errors="coerce", format="mixed")
+        values = pd.to_numeric(shown[excess_col], errors="coerce").to_numpy(dtype=float)
+        excess = pd.Series(values, index=pd.DatetimeIndex(stamps))
+        excess = excess[excess.index.notna() & excess.notna()]
+        if not excess.empty:
+            series[symbol] = excess.groupby(level=0).last().sort_index()
+    if not series:
+        return pd.DataFrame()
+    timeline = pd.concat(series, axis=1).sort_index().ffill().fillna(0.0)
+    timeline = timeline[sorted(timeline.columns)]
+    timeline[TOTAL_EXCESS_COL] = timeline.sum(axis=1)
+    timeline.index.name = time_col
+    timeline.columns.name = None
+    return timeline
 
 
 # ============================================================================

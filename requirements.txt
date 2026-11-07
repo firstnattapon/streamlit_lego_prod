@@ -10,4 +10,6 @@ pandas==2.3.3
 numpy==2.4.6
 # Reviewed compatible version: Streamlit allows <7 and Webull SDK requires <6.
 protobuf==5.29.6
+# Charts (lego_charts.py) — st.plotly_chart in Streamlit 1.55 supports Plotly 6.
+plotly==6.5.2
 

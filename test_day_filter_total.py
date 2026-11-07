@@ -16,6 +16,7 @@ import streamlit_app
 from lego_dash_core import (ALL_DAYS, LEDGER_COLS, MONEY_COLS, chain_p0_hint, day_options,
                             day_positions, latest_excess_total, order_columns,
                             recompute_gated_ledger, rows_to_df, table_tooltips, utc_days)
+from lego_charts import LEDGER_NAMES
 from lego_hover_table import build_hover_table_html
 from test_dash_core import FIX_C as GATED_FIX_C
 from test_dash_core import _mk_chain
@@ -183,16 +184,20 @@ def audit_table(page: AppTest) -> pd.DataFrame | None:
 
 @pytest.fixture
 def charts(monkeypatch) -> list:
-    """ข้อมูลที่ Live Dashboard ส่งเข้า st.line_chart (กราฟของแท็บ 101 ไม่นับ)"""
+    """ข้อมูลกราฟ Rₙ / Aₙ / Eₙ ที่ Live Dashboard ส่งเข้า st.plotly_chart เป็น DataFrame
+    (index = DNA step, คอลัมน์ = LEDGER_COLS แบบกราฟเดิม) — กราฟแท็บ 101 (แกน "รอบ") และกราฟผลรวมไม่นับ"""
     seen: list = []
-    real = st.line_chart
+    real = st.plotly_chart
+    columns = dict(zip(LEDGER_NAMES, (LEDGER_COLS[0], LEDGER_COLS[2], LEDGER_COLS[3])))
 
-    def spy(data=None, *args, **kwargs):
-        if hasattr(data, "columns") and "Aₙ สะสม (USD)" in data.columns:
-            seen.append(data.copy())
-        return real(data, *args, **kwargs)
+    def spy(figure=None, *args, **kwargs):
+        traces = {trace.name: trace for trace in getattr(figure, "data", ())}
+        if set(columns) <= set(traces) and figure.layout.xaxis.title.text == "DNA step":
+            seen.append(pd.DataFrame({col: list(traces[name].y) for name, col in columns.items()},
+                                     index=list(traces[LEDGER_NAMES[2]].x)))
+        return real(figure, *args, **kwargs)
 
-    monkeypatch.setattr(st, "line_chart", spy)
+    monkeypatch.setattr(st, "plotly_chart", spy)
     return seen
 
 
