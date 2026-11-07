@@ -429,7 +429,15 @@ def test_the_hover_table_shows_a_zero_first_row_without_negative_zero():
     assert "1,500.0000 × (10.1900 / 10.1900 − 1)" in page
 
 
-# ---- แอป: ป้ายแจ้ง + ตัวเลขเริ่มจาก 0 ----------------------------------------
+# ---- แอป: ตัวเลขเริ่มจาก 0 โดยไม่มีป้ายแจ้ง (เจ้าของขอปิด — ค่าที่ DB บันทึกดูได้จาก tooltip) ------
+
+# ข้อความเฉพาะของป้าย ℹ️ ที่เคยขึ้นเหนือ metric — ต้องไม่กลับมา
+BANNER_MARKERS = ("ถูกบันทึกใน DB", "แสดงแบบเริ่มจาก 0", "ถูกนับเป็นกำไร")
+
+
+def _banners(page: AppTest) -> list[str]:
+    return [i.value for i in page.info if any(m in i.value for m in BANNER_MARKERS)]
+
 
 def _app(monkeypatch, df: pd.DataFrame) -> AppTest:
     rows = {str(r["run_id"]): {k: (None if pd.isna(v) else (v.item() if hasattr(v, "item") else v))
@@ -452,14 +460,13 @@ def _app(monkeypatch, df: pd.DataFrame) -> AppTest:
     return page
 
 
-def test_the_page_says_the_table_was_rebased_and_starts_the_numbers_from_zero(monkeypatch):
+def test_the_page_starts_the_numbers_from_zero_without_a_banner(monkeypatch):
     page = _app(monkeypatch, v3_chain(PLAIN))
     page.run(timeout=30)
     assert not page.exception
-    banners = [i.value for i in page.info if "แสดงแบบเริ่มจาก 0" in i.value]
-    assert len(banners) == 1
-    assert f"ΔA₀ = {SLIP:,.4f}" in banners[0] and "10.2450" in banners[0] and "10.1900" in banners[0]
-    assert "ไม่แก้ DB" in banners[0] and "Integrity check" in banners[0]
+    assert genesis_baseline_info(v3_chain(PLAIN), P0) is not None    # DB ยังบันทึก slippage ไว้จริง
+    assert _banners(page) == []                                       # แต่หน้าไม่ขึ้นป้ายแจ้งแล้ว
+    assert not any(f"ΔA₀ = {SLIP:,.4f}" in i.value for i in page.info)
     assert {m.label: m.value for m in page.metric}["Eₙ สะสม (USD)"] == "0.00"
     # ledger ที่ DB บันทึกยังสอดคล้องกันเอง: integrity ผ่าน และไม่ขึ้นคำเตือน "engine เขียนผิด"
     assert any("ผ่านการตรวจสมการ" in s.value for s in page.success)
@@ -472,7 +479,7 @@ def test_a_chain_funded_from_flat_shows_no_rebase_banner(monkeypatch):
     page = _app(monkeypatch, df)
     page.run(timeout=30)
     assert not page.exception
-    assert not any("แสดงแบบเริ่มจาก 0" in i.value for i in page.info)
+    assert _banners(page) == []
 
 
 def test_hot_deploy_reloads_a_core_that_predates_the_genesis_baseline(monkeypatch):
