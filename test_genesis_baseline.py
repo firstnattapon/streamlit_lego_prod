@@ -4,7 +4,7 @@ fill แรกของ chain มี slippage (quote → fill). ถ้านั�
 ที่ค้างอยู่ใน Aₙ/Eₙ ทุกแถว — backend ใส่ baseline ศูนย์ (initial_funding_zero_v1) เฉพาะบัญชี holdings = 0
 จึงมี chain ที่เริ่มด้วย LEAPS (holdings ≠ 0) ที่ DB บันทึก ΔA₀ ≠ 0 ไว้ (fixtures/paper_session_leaps.json ของ
 backend เองก็เป็นแบบนี้). dashboard "แสดง" n = 0 เริ่มจาก 0 (genesis_baseline=True) โดยไม่แก้ DB และไม่เปลี่ยน
-โหมดดิบที่ integrity_report ใช้.
+โหมดดิบที่ integrity_report ใช้. act ถัดจาก genesis เทียบ P₀ (40d191e) จึงเท่ากับ chain ที่แถวแรกไม่มี fill.
 
 ค่าคาดหวังคำนวณแยกอิสระในไฟล์นี้ (recurrence ของ backend v3 จาก events) ไม่ได้ย้อนจากโค้ด dashboard.
 ข้อมูลทั้งหมดสังเคราะห์: ไม่มี run_id/chain_key จริงของบัญชี (repo เป็น public และ gitleaks จับชื่อ chain แบบ symbol+hex)
@@ -169,13 +169,16 @@ def test_e_mark_stays_a_minus_r_after_the_baseline_is_removed():
         assert shown.loc[i, "E_mark_at_observation"] == pytest.approx(shown.loc[i - 1, A] - shown.loc[i, R])
 
 
-def test_later_fills_keep_their_own_deltas_and_accumulate_from_zero():
+def test_the_next_act_is_measured_from_p0_and_accumulates_from_zero():
+    """เหมือน chain ที่แถวแรกไม่มี fill: act ถัดจาก genesis เทียบ P₀ ไม่ใช่ราคา fill แรก"""
     df = v3_chain(WITH_SELL)
     sell = int(df.index[df["สถานะ"] == "READY_SELL"][0])
     shown = _display(df)
-    expected_delta = FIX_C * (10.59 / FILL - 1.0)       # P_acted = ราคา fill แรก (10.245) ไม่ใช่ quote
-    assert shown.loc[sell, DA] == pytest.approx(expected_delta) == pytest.approx(df.loc[sell, DA])
+    assert df.loc[sell, DA] == pytest.approx(FIX_C * (10.59 / FILL - 1.0))   # DB เทียบราคา fill แรก (10.245)
+    expected_delta = FIX_C * (10.59 / P0 - 1.0)         # ตารางเทียบ P₀ (10.19)
+    assert shown.loc[sell, DA] == pytest.approx(expected_delta)
     assert shown.loc[sell, A] == pytest.approx(expected_delta)  # สะสมจาก 0 ไม่รวม slippage แถวแรก
+    assert shown.loc[sell, "previous_action_price"] == pytest.approx(P0)
     assert shown.loc[sell, "previous_actual_cumulative"] == 0.0
     r_sell = FIX_C * math.log(10.62 / P0)
     assert shown.loc[sell, E] == pytest.approx(expected_delta - r_sell)          # E = A − R ณ fill
@@ -184,6 +187,18 @@ def test_later_fills_keep_their_own_deltas_and_accumulate_from_zero():
         assert shown.loc[i, E] == pytest.approx(expected_delta - r_sell)
     for i in range(1, sell):
         assert shown.loc[i, A] == 0.0 and shown.loc[i, E] == 0.0
+
+
+def test_a_genesis_fill_is_shown_like_a_chain_whose_first_row_has_no_fill():
+    """chain ที่แถวแรกเป็น PASS ที่ P₀ (ไม่มี fill) — backend เก็บ act แรกเทียบ P₀ เองอยู่แล้ว
+    chain ที่แถวแรกมี fill ต้องแสดง Rₙ/ΔAₙ/Aₙ/Eₙ ชุดเดียวกันทุกแถว"""
+    shown = _display(v3_chain(WITH_SELL))
+    no_fill = v3_chain([{**GENESIS, "fill": None}, *WITH_SELL[1:]])
+    assert no_fill.loc[0, "cashflow_status"] == "NO_ACTION" and integrity_report(no_fill, p0_hint=P0)[1]
+    assert genesis_baseline_info(no_fill, P0) is None                # ไม่มีอะไรต้อง rebase
+    for col in (R, DA, A, E):
+        assert shown[col].astype(float).tolist() == pytest.approx(
+            no_fill[col].astype(float).tolist(), abs=1e-9), col
 
 
 def test_a_row_observed_before_the_first_fill_finalizes_is_not_shifted():
@@ -264,13 +279,19 @@ def test_backend_leaps_fixture_books_the_first_fill_slippage_and_is_rebased():
 
     shown = _display(df, LEAPS_P0)
     assert [shown.loc[0, c] for c in (R, DA, A, E)] == [0.0, 0.0, 0.0, 0.0]
-    # A′ = ผลรวม ΔA ของ fill ที่ไม่ใช่ fill แรก (คำนวณแยกจากคอลัมน์ ΔA ที่บันทึก); E′ = A′ − R_basis
+    # ΔA′ คำนวณแยกจากคอลัมน์ที่บันทึก: fill แรก = 0; act แรกหลัง genesis เทียบ P₀ (เหมือน chain ที่แถวแรก
+    # ไม่มี fill) ไม่ใช่ราคา fill แรก; fill ถัดจากนั้นคง ΔA ที่บันทึก. A′ = ผลรวม ΔA′, E′ = A′ − R_basis
+    fills = df.index[df["cashflow_status"].eq("FINALIZED")].tolist()
+    first_act = fills[1]
+    assert df.loc[first_act, "previous_action_price"] == pytest.approx(65.51)   # DB เทียบราคา fill แรก
     running = df[DA].astype(float).copy()
     running.iloc[0] = 0.0
+    running.loc[first_act] = 3000.0 * (float(df.loc[first_act, "execution_price"]) / LEAPS_P0 - 1.0)
+    assert shown[DA].astype(float).tolist() == pytest.approx(running.tolist(), abs=1e-9)
+    assert shown.loc[first_act, "previous_action_price"] == pytest.approx(LEAPS_P0)
     assert shown[A].astype(float).tolist() == pytest.approx(running.cumsum().tolist(), abs=1e-9)
     assert shown[E].astype(float).tolist() == pytest.approx(
         (shown[A].astype(float) - df["R_basis"].astype(float)).tolist(), abs=1e-9)
-    assert shown[DA].astype(float).iloc[1:].tolist() == pytest.approx(df[DA].astype(float).iloc[1:].tolist())
     for i in range(1, len(shown)):
         assert shown.loc[i, "E_mark_at_observation"] == pytest.approx(shown.loc[i - 1, A] - shown.loc[i, R], abs=1e-9)
     # ข้อมูลที่ backend เขียนยังผ่านการตรวจสมการ (อ่านแถวดิบ) และโหมดดิบไม่แก้อะไร
@@ -329,13 +350,14 @@ def test_execution_confirmed_genesis_fill_books_no_pnl_in_display_mode(first_ste
     shown = _display(df, p0)
     assert [shown.loc[0, c] for c in (R, DA, A, E)] == [0.0, 0.0, 0.0, 0.0]
     assert shown.loc[1, A] == 0.0                                            # PASS แช่แข็งที่ 0
-    assert shown.loc[1, E] == pytest.approx(-fix_c * math.log(fill0 / p0))   # P_acted = ราคา fill (101)
-    d2 = fix_c * (104.0 / fill0 - 1.0)                                       # fill ถัดไปเทียบราคา fill แรก
+    assert shown.loc[1, E] == 0.0             # P_acted = P₀ (100): Eₙ = 0 − FIX_C × ln(P₀ / P₀) = 0
+    d2 = fix_c * (104.0 / p0 - 1.0)           # fill ถัดไปเทียบ P₀ เหมือน chain ที่แถวแรกไม่มี fill
     assert shown.loc[2, DA] == pytest.approx(d2) and shown.loc[2, A] == pytest.approx(d2)
     assert shown.loc[2, E] == pytest.approx(d2 - fix_c * math.log(104.5 / p0))
     tips = ledger_explanations(df, p0=p0, genesis_baseline=True)
     assert f"{_f(fix_c)} × ({_f(100.0)} / {_f(100.0)} − 1)" in tips[0][DA]
-    assert "fill จริง 101.0000" in tips[0][DA] and "ค่าที่ DB บันทึก" in tips[0][A]
+    assert "fill จริง 101.0000" in tips[0][DA] and f"P_acted ของ act ถัดไป = {_f(p0)}" in tips[0][DA]
+    assert "ค่าที่ DB บันทึก" in tips[0][A]
 
 
 # ---- tooltip: สูตรแทนค่าที่ผู้ใช้ขอ + ค่าที่ DB บันทึก ---------------------------
@@ -347,7 +369,7 @@ def test_genesis_tooltips_show_the_p0_over_p0_formulas_and_what_was_removed():
     assert formula in tips[0][DA] and formula in tips[0][A]
     assert f"ln({_f(P0)} / {_f(P0)})" in tips[0][R]             # 1,500.0000 × ln(10.1900 / 10.1900)
     assert "Eₙ = Aₙ − Rₙ" in tips[0][E] and "Aₙ = 0 — เริ่มนับสะสมจากศูนย์" in tips[0][A]
-    assert f"fill จริง {_f(FILL)}" in tips[0][DA] and f"P_acted ของ act ถัดไป = {_f(FILL)}" in tips[0][DA]
+    assert f"fill จริง {_f(FILL)}" in tips[0][DA] and f"P_acted ของ act ถัดไป = {_f(P0)}" in tips[0][DA]
     assert f"= {_f(SLIP)} (นับ slippage เป็นกำไร)" in tips[0][DA]   # ที่มาของค่าที่ DB บันทึก
     for col in (DA, A, E):
         assert f"ค่าที่ DB บันทึก {_f(SLIP)} − slippage ของ fill แรกที่ตัดออก {_f(SLIP)} = {_f(0.0)}" in tips[0][col]
@@ -373,11 +395,15 @@ def test_every_tooltip_contains_the_value_the_display_shows():
 def test_tooltip_rows_after_a_later_fill_use_the_rebased_operands():
     df = v3_chain(WITH_SELL)
     sell = int(df.index[df["สถานะ"] == "READY_SELL"][0])
-    delta = FIX_C * (10.59 / FILL - 1.0)
+    delta = FIX_C * (10.59 / P0 - 1.0)                          # act ถัดจาก genesis เทียบ P₀
     tips = ledger_explanations(df, p0=P0, genesis_baseline=True)
     a_text = tips[sell][A]
     assert "Aₙ = previous_actual_cumulative + ΔAₙ" in a_text
     assert f"= {_f(0.0)} + {_f(delta)}" in a_text and f"= {_f(delta)}" in a_text   # prev′ = 0 ไม่ใช่ 8.0962
+    d_text = tips[sell][DA]
+    assert f"({_f(10.59)} / {_f(P0)} − 1)" in d_text and f"= {_f(delta)}" in d_text  # previous_action_price′ = P₀
+    stored = FIX_C * (10.59 / FILL - 1.0)
+    assert f"ค่าที่ DB บันทึก {_f(stored)} (ใช้ previous_action_price = {_f(FILL)})" in d_text
 
 
 def test_default_mode_tooltips_are_exactly_what_they_were():
