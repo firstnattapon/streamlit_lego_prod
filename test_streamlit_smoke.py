@@ -22,6 +22,9 @@ def test_app_starts_without_firebase_secrets_and_keeps_tab_ui():
     assert len(app.info) >= 1
     assert len(app.number_input) == 6
     assert len(app.text_input) == 1
+    # Only the 101 ledger chart renders without Firebase; it is Plotly, not st.line_chart.
+    assert len(app.get("plotly_chart")) == 1
+    assert len(app.get("vega_lite_chart")) == 0        # st.line_chart renders as this
 
 
 def test_live_execution_dashboard_renders_with_mocked_read_only_firebase(
@@ -60,6 +63,10 @@ def test_live_execution_dashboard_renders_with_mocked_read_only_firebase(
     metric_labels = {item.label for item in app.metric}
     assert {"สถานะตัดสินใจล่าสุด", "DNA step", "Pₙ (USD)",
             "Eₙ สะสม (USD)"}.issubset(metric_labels)
+    # Eₙ total over time + the selected chain's ledger + the 101 ledger, all Plotly.
+    assert len(app.get("plotly_chart")) == 3
+    assert len(app.get("vega_lite_chart")) == 0
+    assert not any("ผลรวมทุกตัว" in item.value for item in app.warning)
     assert any("Execution cashflow ล่าสุด" in item.value for item in app.caption)
     assert any("execution_confirmed_v1" in item.value for item in app.caption)
     # State pointer and integrity report render as dataframes (plus the 101 tab's
