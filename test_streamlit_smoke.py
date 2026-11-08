@@ -59,20 +59,35 @@ def test_live_execution_dashboard_renders_with_mocked_read_only_firebase(
     app.run(timeout=20)
 
     assert not app.exception
-    assert len(app.tabs) == 6       # 4 tabs + Summary and Diagrams inside the Cheat Sheet tab
+    # 4 tabs + ข้อมูล/กราฟ inside Live + Summary and Diagrams inside the Cheat Sheet tab
+    assert len(app.tabs) == 8
     metric_labels = {item.label for item in app.metric}
     assert {"สถานะตัดสินใจล่าสุด", "DNA step", "Pₙ (USD)",
             "Eₙ สะสม (USD)"}.issubset(metric_labels)
+    # The ข้อมูล view opens first and only the open view runs: the 101 ledger is the only chart.
+    assert len(app.get("plotly_chart")) == 1
+    assert len(app.get("vega_lite_chart")) == 0
+    assert any("Execution cashflow ล่าสุด" in item.value for item in app.caption)
+    assert any("execution_confirmed_v1" in item.value for item in app.caption)
+    # State pointer (this chain) and the 101 tab's ledger render as dataframes. The
+    # 17-column table is the hover iframe by default (tooltips and the dataframe
+    # fallback: test_ledger_hover.py); Integrity runs only while its expander is open.
+    assert len(app.dataframe) >= 2
+    assert not app.success
+
+    app.session_state["live_integrity"] = True
+    app.run(timeout=20)
+    assert not app.exception
+    assert len(app.dataframe) >= 3 and app.success
+
+    app.session_state["live_view"] = "กราฟ"
+    app.run(timeout=20)
+    assert not app.exception
     # Eₙ total over time + the selected chain's ledger + the 101 ledger, all Plotly.
     assert len(app.get("plotly_chart")) == 3
     assert len(app.get("vega_lite_chart")) == 0
     assert not any("ผลรวมทุกตัว" in item.value for item in app.warning)
-    assert any("Execution cashflow ล่าสุด" in item.value for item in app.caption)
-    assert any("execution_confirmed_v1" in item.value for item in app.caption)
-    # State pointer and integrity report render as dataframes (plus the 101 tab's
-    # ledger). The 17-column table is the hover iframe by default; its tooltips and
-    # the dataframe fallback are covered in test_ledger_hover.py.
-    assert len(app.dataframe) >= 3
+    assert "DNA step" not in {item.label for item in app.metric}   # the cards belong to ข้อมูล
 
 
 

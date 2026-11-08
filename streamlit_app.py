@@ -1,10 +1,12 @@
 """streamlit_app.py — Dashboard (read-only) อ่านจาก Firebase RTDB + Rebalancing 101
 
 4 แท็บ:
-  📊 Live Dashboard   — อ่าน committed rows จาก Firebase (เหมือนเดิม), กรอง
-                        committed==True, เลือก chain, ตาราง 17 คอลัมน์, integrity E1–E8
-                        ตัวกรองวัน (UTC) เหนือกราฟ (ค่าเริ่มต้นวันล่าสุด — เลือกแค่แถวที่แสดง)
-                        และ metric Eₙ ผลรวมทุกตัว (chain ล่าสุดของแต่ละหุ้น) + กราฟผลรวมตามเวลา
+  📊 Live Dashboard   — อ่าน Firebase ครั้งเดียวต่อการโหลดหน้า (lego_live_data.Snapshot) แล้วแสดงใน
+                        st.fragment: ตัวเลือก Chain (จำไว้ใน URL ?chain=) → หัวข้อ "หุ้น · Live" พร้อมสถานะ
+                        สด/ค้าง/ผิดพลาด เวลาอัปเดต และปุ่มรีเฟรช → ตัวกรองวัน (UTC) → แท็บย่อย
+                        ข้อมูล (การ์ด metric รวม Eₙ ผลรวมทุกตัว, ตาราง 17 คอลัมน์, Order audit,
+                        Integrity E1–E8 ที่คำนวณเมื่อเปิดเท่านั้น, State pointer) และ กราฟ (Rₙ/Aₙ/Eₙ ตามวัน
+                        + Eₙ ผลรวมทุกตัวตามเวลา) — สลับ Chain/แท็บ/วันไม่อ่าน Firebase ซ้ำ ไม่คำนวณซ้ำ
                         (กราฟทั้งหมดเป็น Plotly จาก lego_charts.py)
   🎓 Rebalancing 101  — playground เชิงสอน "gated demo (DNA gate + บัญชีแบบแช่แข็ง)"
                         ไม่ต้องมี Firebase: สุ่มราคา -> เดิน ledger gated_theoretical_v2
@@ -25,6 +27,7 @@ import hashlib
 import importlib
 import json
 import re
+from contextlib import contextmanager
 from pathlib import Path
 
 import firebase_admin
@@ -52,7 +55,7 @@ _REQUIRED_DASH_CORE_API = (
     "table_tooltips",
     "leaps_summary",
     # หน้าไม่เรียกฟังก์ชันนี้แล้ว (ปิดป้ายแจ้ง) แต่ยังเป็นตัวบอกว่า core รองรับ genesis_baseline=True
-    # ที่ recompute_gated_ledger/table_tooltips ถูกเรียกด้านล่าง — core เก่ากว่านั้นต้องถูกโหลดใหม่
+    # ที่ recompute_gated_ledger/table_tooltips ถูกเรียกใน lego_live_data — core เก่ากว่านั้นต้องถูกโหลดใหม่
     "genesis_baseline_info",
     "ALL_DAYS",
     "day_options",
@@ -64,31 +67,28 @@ _REQUIRED_DASH_CORE_API = (
 if any(not hasattr(_lego_dash_core, name) for name in _REQUIRED_DASH_CORE_API):
     _lego_dash_core = importlib.reload(_lego_dash_core)
 
-from lego_dash_core import (ALL_DAYS, DEFAULT_GATED_DNA, EXECUTION_CONFIRMED_SEMANTICS,
-                            EXECUTION_TERMINAL_FROZEN_V2, HOLDINGS_COL,
+from lego_dash_core import (ALL_DAYS, DEFAULT_GATED_DNA, HOLDINGS_COL,
                             MAX_REBALANCING_STEPS, MONEY_COLS,
                             audit_with_ledger_time, build_gate_actions,
-                            chain_p0_hint, count_ledger_corrections,
-                            day_options, day_positions,
-                            default_chain_index, excess_total_timeline,
+                            day_options, day_positions, excess_total_timeline,
                             filter_audit_rows,
                             gated_rebalancing_cashflow_from_prices,
-                            integrity_report, latest_excess_total, leaps_summary,
-                            order_columns, pending_broker_fee_count,
+                            latest_excess_total, order_columns, pending_broker_fee_count,
                             rebalancing_cashflow_from_prices,
-                            recompute_gated_ledger, rows_to_df,
-                            simulate_rebalancing_prices, table_tooltips)
+                            simulate_rebalancing_prices)
+
+# เหตุผลเดียวกับด้านบน: lego_live_data ที่แคชไว้จากรุ่นก่อนต้องไม่ทำให้หน้าใหม่ล่ม
+import lego_live_data as _lego_live_data
+
+_REQUIRED_LIVE_DATA_API = ("fetch_snapshot", "Snapshot", "Freshness", "describe",
+                           "fmt_num", "fmt_text", "state_table")
+if any(not hasattr(_lego_live_data, name) for name in _REQUIRED_LIVE_DATA_API):
+    _lego_live_data = importlib.reload(_lego_live_data)
+
+from lego_live_data import (ERROR, LIVE, STALE, ChainView, Freshness, Snapshot, SnapshotError,
+                            describe, fetch_snapshot, fmt_num, fmt_text, state_table)
 from lego_charts import (MAX_ACT_MARKERS, PLOTLY_CONFIG, ledger_figure,
                          total_excess_figure)
-
-FROZEN_TERMINAL_SEMANTICS = getattr(
-    _lego_dash_core, "FROZEN_TERMINAL_SEMANTICS",
-    (EXECUTION_TERMINAL_FROZEN_V2,),
-)
-
-ROWS_PATH = "webull_lego_rows"
-STATE_PATH = "webull_lego_state"
-AUDIT_PATH = "webull_lego_order_audit"
 
 # Web Apps: คู่มือ/playground แบบ HTML ล้วน (self-contained) แสดงใน iframe ผ่าน
 # components.html — ชุดนี้คัดลอกมาจากแท็บ "🌐 Web Apps" ของ pages/Manual.py (leg-code)
@@ -158,49 +158,49 @@ def _init():
     return True
 
 
-def load_rows(paper: bool = False) -> pd.DataFrame:
-    return rows_to_df(_ref(ROWS_PATH, paper).get())
+def _db_name(paper: bool) -> str:
+    return "PAPER" if paper else "PROD"
 
 
-def render_ledger_table(show: pd.DataFrame, persisted_df: pd.DataFrame,
-                        p0_hint: float | None, rows: list[int] | None = None) -> None:
-    """ตาราง 17 คอลัมน์: โหมดชี้เมาส์ดูที่มาของ Rₙ/ΔAₙ/Aₙ/Eₙ (default) หรือ st.dataframe เรียงได้
+@contextmanager
+def safe_section(action: str):
+    """ส่วนเสริมล้มได้โดยไม่พาหน้าล้ม: คำเตือน "<action>ไม่ได้ (…)" แทนเนื้อหา (st.rerun/st.stop ผ่านไปปกติ)"""
+    try:
+        yield
+    except Exception as exc:
+        st.warning(f"{action}ไม่ได้ ({type(exc).__name__}: {exc})")
 
-    ข้อความที่มามาจาก trace ของ recompute_gated_ledger บนข้อมูลชุดเดียวกับที่ตารางแสดง
-    (persisted_df) จึงเรียงแถวตรงกับ ``show`` และตัวเลขที่แทนค่าคือชุดที่คำนวณจริง
 
-    ``rows`` = ตำแหน่งแถวของ chain ที่ ``show`` แสดง (ตัวกรองวัน); None = ทุกแถว.
-    tooltip คำนวณจากทั้ง chain แล้วเลือกเฉพาะแถวเหล่านี้ (P_acted/Aₙ₋₁ อาจมาจากแถวของวันก่อน)
+TOTAL_EXCESS_LABEL = "Eₙ สะสม (USD) ผลรวมทุกตัว"
+DAY_FILTER_LABEL = "วัน (UTC)"
+STATUS_COLORS = {LIVE: "green", STALE: "orange", ERROR: "red"}
+
+
+def render_ledger_table(view: ChainView, rows: list[int]) -> None:
+    """ตาราง 17 คอลัมน์ของแถว ``rows`` (ตัวกรองวัน): โหมดดูที่มา (default) หรือ st.dataframe เรียงได้
+
+    ที่มาคำนวณจากค่าที่ DB บันทึกทั้ง chain แล้วเลือกเฉพาะแถว — P_acted/Aₙ₋₁ อาจมาจากแถวของวันก่อน
     """
-    hover = st.toggle("🖱️ ชี้เมาส์ที่ตัวเลข Rₙ / ΔAₙ / Aₙ / Eₙ เพื่อดูที่มา", value=True,
-                      key="live_hover_table",
-                      help="ปิดเพื่อใช้ตารางแบบเรียง/กรองได้ (st.dataframe) — แต่ไม่มี tooltip ที่มา")
-    if hover:
-        try:
-            # LEAPS แทนหุ้น: แถวที่ bot ใช้ LEAPS ได้ tooltip ที่คอลัมน์ 7 (หุ้นจริง + LEAPS) ด้วย
-            # ไม่มี LEAPS เลยก็ได้ tooltip/คอลัมน์ชุดเดิมทุกตัวอักษร
-            # genesis_baseline=True ต้องตรงกับที่ใช้คำนวณ ``show`` (แถว n = 0 เริ่มจาก 0)
-            tips, tip_cols = table_tooltips(persisted_df, p0=p0_hint, genesis_baseline=True)
-            if rows is not None:
-                tips = [tips[i] for i in rows]
-            theme = getattr(getattr(st.context, "theme", None), "type", None)
-            components.html(
-                build_hover_table_html(show, tips, tip_cols, MONEY_COLS, theme=theme),
-                height=hover_table_height(len(show)))
-            st.caption("ชี้เมาส์ (หรือกด Tab) ที่ตัวเลขคอลัมน์ Rₙ · ΔAₙ · Aₙ · Eₙ"
-                       + (" · จำนวนถือครอง (หุ้นจริง + LEAPS)" if HOLDINGS_COL in tip_cols
-                          else "")
-                       + " — tooltip แสดงสูตรพร้อมแทนค่าจริงของแถวนั้น และ P_acted/Aₙ₋₁ มาจากแถวไหน "
-                       "(ตารางปัด 2 ตำแหน่ง ส่วน tooltip แสดง 4 ตำแหน่ง)")
+    show = order_columns(view.ledger.iloc[rows].copy())
+    for col in MONEY_COLS:
+        if col in show:
+            show[col] = show[col].astype(float).round(2)
+    if st.toggle("ดูที่มา", value=True, key="live_hover_table",
+                 help="ชี้เมาส์ (หรือกด Tab) ที่ตัวเลข Rₙ / ΔAₙ / Aₙ / Eₙ เพื่อดูสูตรพร้อมแทนค่าจริง — "
+                      "ปิดเพื่อใช้ตารางแบบเรียง/กรองได้ (st.dataframe) แต่ไม่มี tooltip ที่มา"):
+        try:   # LEAPS แทนหุ้น: แถวที่ bot ใช้ LEAPS ได้ tooltip ที่คอลัมน์ 7 (หุ้นจริง + LEAPS) ด้วย
+            tips, tip_cols = view.tooltips()
+            components.html(build_hover_table_html(show, [tips[i] for i in rows], tip_cols, MONEY_COLS,
+                                                   theme=_streamlit_theme()),
+                            height=hover_table_height(len(show)))
+            st.caption("ชี้เมาส์ (หรือกด Tab) ที่ Rₙ · ΔAₙ · Aₙ · Eₙ"
+                       + (" · จำนวนถือครอง (หุ้นจริง + LEAPS)" if HOLDINGS_COL in tip_cols else "")
+                       + " เพื่อดูสูตรที่แทนค่าจริงและแถวที่ P_acted/Aₙ₋₁ มาจาก (tooltip แสดง 4 ตำแหน่ง)")
             return
         except Exception as exc:   # tooltip เป็นส่วนเสริม — ห้ามทำให้ตารางหลักล่ม
             st.warning(f"สร้างตารางแบบชี้เมาส์ไม่ได้ ({type(exc).__name__}: {exc}) "
                        "— แสดงตารางปกติแทน")
     st.dataframe(style_status_rows(show, MONEY_COLS), width="stretch")
-
-
-TOTAL_EXCESS_LABEL = "Eₙ สะสม (USD) ผลรวมทุกตัว"
-DAY_FILTER_LABEL = "วัน (UTC)"
 
 
 def excess_total_metric(rows: pd.DataFrame, state, paper: bool) -> tuple[str, str]:
@@ -218,20 +218,17 @@ def excess_total_metric(rows: pd.DataFrame, state, paper: bool) -> tuple[str, st
     return value, summary["text"]
 
 
-def render_total_excess(rows: pd.DataFrame, state, paper: bool) -> None:
-    """กราฟ "Eₙ ผลรวมทุกตัว ตามเวลา" — chain ชุดเดียวกับ metric ผลรวม จึงจบที่ค่าเดียวกับ metric
-
-    ``rows`` = ทุกแถวของฐานข้อมูลนี้ (ก่อนเลือก chain) · ส่วนเสริม ห้ามทำให้หน้าล่ม
-    """
-    st.subheader("Eₙ ผลรวมทุกตัว ตามเวลา")
-    try:
-        timeline = excess_total_timeline(rows, state, paper_page=paper)
+def render_total_excess(snap: Snapshot, paper: bool) -> None:
+    """กราฟ "Eₙ ผลรวมทุกตัว ตามเวลา" — chain ชุดเดียวกับ metric ผลรวม จึงจบที่ค่าเดียวกับ metric"""
+    st.subheader("Eₙ ผลรวมทุกตัว ตามเวลา", anchor=False)
+    with safe_section("สร้างกราฟ Eₙ ผลรวมทุกตัว"):
+        timeline = snap.memo("total_timeline", lambda: excess_total_timeline(
+            snap.rows, snap.state, paper_page=paper))
         if timeline.empty:
             st.caption("ยังไม่มี chain ที่นับได้ (หรือไม่มีแถวที่มีเวลา UTC และ Eₙ) จึงยังไม่มีกราฟ")
             return
-        database = "PAPER" if paper else "PROD"
         st.plotly_chart(total_excess_figure(timeline, theme=_streamlit_theme()),
-                        theme=None, config=PLOTLY_CONFIG, key=f"live_total_excess:{database}")
+                        theme=None, config=PLOTLY_CONFIG, key=f"live_total_excess:{_db_name(paper)}")
         st.caption(
             "เส้นหนา = ผลรวม · เส้นบาง = Eₙ ของแต่ละหุ้น · นับ chain ชุดเดียวกับ metric "
             f"“{TOTAL_EXCESS_LABEL}” (chain ล่าสุดของแต่ละหุ้น"
@@ -243,8 +240,6 @@ def render_total_excess(rows: pd.DataFrame, state, paper: bool) -> None:
             table = timeline.iloc[-1].rename("Eₙ ล่าสุด (USD)").astype(float).round(2).to_frame()
             table.index.name = "หุ้น"
             st.dataframe(table, width="stretch")
-    except Exception as exc:   # กราฟเป็นส่วนเสริม — ห้ามทำให้หน้า Live ล่ม
-        st.warning(f"สร้างกราฟ Eₙ ผลรวมทุกตัวไม่ได้ ({type(exc).__name__}: {exc})")
 
 
 def live_ledger_figure(view: pd.DataFrame):
@@ -260,7 +255,7 @@ def live_ledger_figure(view: pd.DataFrame):
 
 
 def render_day_filter(df: pd.DataFrame, chain, paper: bool) -> list[int]:
-    """selectbox "วัน (UTC)" เหนือกราฟ — คืนตำแหน่งแถวที่แสดงในกราฟ ตาราง 17 คอลัมน์ และ Order audit
+    """selectbox "วัน (UTC)" (ใช้ร่วมทั้งแท็บ ข้อมูล/กราฟ) — คืนตำแหน่งแถวที่ตาราง กราฟ และ Order audit แสดง
 
     ``df`` คือ ledger ที่คำนวณจากทั้ง chain แล้ว ตัวกรองแค่เลือกแถว ไม่คำนวณอะไรใหม่.
     ค่าเริ่มต้น = วันล่าสุดที่ chain มีแถว (ตัวแรกของรายการ); key ผูกกับฐานข้อมูล, chain และวันล่าสุด
@@ -271,10 +266,9 @@ def render_day_filter(df: pd.DataFrame, chain, paper: bool) -> list[int]:
     if not options:                       # ไม่มีเวลาที่อ่านได้ -> แสดงทุกแถวเหมือนเดิม
         return list(range(len(df)))
     pick, note = st.columns([1, 3], vertical_alignment="bottom")
-    database = "PAPER" if paper else "PROD"
     day = pick.selectbox(
-        DAY_FILTER_LABEL, options, index=0, key=f"live_day:{database}:{chain}:{options[0]}",
-        help="เลือกวัน (UTC) ที่จะแสดงในกราฟ ตาราง 17 คอลัมน์ และ Order audit — ค่าเริ่มต้นคือวันล่าสุด "
+        DAY_FILTER_LABEL, options, index=0, key=f"live_day:{_db_name(paper)}:{chain}:{options[0]}",
+        help="เลือกวัน (UTC) ที่จะแสดงในตาราง 17 คอลัมน์ กราฟ และ Order audit — ค่าเริ่มต้นคือวันล่าสุด "
              "ที่ chain มีแถว · ตัวเลขทุกตัวยังคำนวณจากทั้ง chain ตัวกรองแค่เลือกแถวที่แสดง "
              "(metric และ Integrity check ใช้ทั้ง chain เสมอ)")
     rows = day_positions(df, day)
@@ -283,175 +277,193 @@ def render_day_filter(df: pd.DataFrame, chain, paper: bool) -> list[int]:
     return rows
 
 
+def render_header(title: str, fresh: Freshness, fetched_at: pd.Timestamp, chain,
+                  now: pd.Timestamp) -> None:
+    """หัวข้อเดียว + ป้าย สด/ค้าง/ผิดพลาด (badge ไม่ใช่ st.warning) + เวลาอัปเดต + ปุ่มรีเฟรชมุมขวา"""
+    head, status, action = st.columns([4, 6, 1.4], vertical_alignment="center")
+    head.subheader(title, anchor=False)
+    where = "" if chain is None else " · chain `" + str(chain).replace("`", "'") + "`"
+    status.markdown(f":{STATUS_COLORS[fresh.status]}-badge[{fresh.label}] {describe(fresh, now)}{where}")
+    if action.button("รีเฟรช", key="live_refresh", icon=":material/refresh:", width="stretch",
+                     help=f"ดึงข้อมูลล่าสุดเมื่อ {fetched_at:%Y-%m-%d %H:%M:%S} UTC — กดเพื่อดึงใหม่ "
+                          "(หน้าไม่รีเฟรชเอง)"):
+        st.rerun(scope="app")      # รันเต็มสคริปต์ = อ่าน Firebase ใหม่
+
+
+def render_health(snap: Snapshot) -> None:
+    """node เสริมที่อ่านไม่ได้ + System health — ต้องเห็นได้ก่อนมีแถวแรก (ระบบพักเพราะ Authentication)"""
+    for note in snap.notes:
+        st.warning(note)
+    if snap.health.empty:
+        return
+    if snap.alarm:
+        st.error("ระบบพักการทำงานจากปัญหา Authentication — ตรวจ credentials/token และเวลาลองใหม่")
+    with st.expander("System health — สถานะปัจจุบันและประวัติ", expanded=snap.alarm):
+        st.dataframe(snap.health, width="stretch")
+        st.caption("RESOLVED/HISTORY เป็นประวัติ ไม่ใช่หลักฐานว่าบัญชีพร้อมเทรดเงินจริง")
+
+
+def render_chain_picker(snap: Snapshot):
+    """Chain แบบ 1 คลิก ผูกกับ ?chain= (ซ่อนเมื่อมีตัวเดียว) — ค่าที่ไม่มีใน options กลับไป chain ล่าสุด"""
+    chains = snap.chains()
+    if len(chains) <= 1:
+        return chains[0] if chains else None
+    return st.radio("Chain", chains, index=chains.index(snap.default_chain()), horizontal=True,
+                    key="chain", bind="query-params", label_visibility="collapsed")
+
+
+def render_alerts(view: ChainView, rows: list[int]) -> None:
+    """คำเตือนที่ต้องเห็นทั้งแท็บ ข้อมูล และ กราฟ (เรื่องเงิน/ความถูกต้องห้ามซ่อนอยู่หลังแท็บ)"""
+    if view.paper_marked:
+        st.markdown(":orange-background[**PAPER**] chain นี้: จำนวนหุ้นและ fill เป็นการจำลอง "
+                    "(Preview จริง ไม่เคย Place) ไม่ใช่เงินจริง")
+    if view.n_corrections:
+        st.warning("⚠️ engine เขียน ledger " + (
+            f"ไม่ตรง execution-confirmed contract {view.n_corrections} แถว — ตาราง/กราฟคำนวณใหม่จาก fill "
+            "ที่ FINALIZED เท่านั้น; pending/rejected/PASS แช่แข็ง ควรตรวจ engine และ order audit ต้นทาง"
+            if view.execution_mode else
+            f"ผิด {view.n_corrections} แถว (แถว PASS ที่ยัง act — ΔAₙ ≠ 0) — ตาราง/กราฟถูก **คำนวณใหม่ตาม"
+            "หลักการแช่แข็ง** (ทุก PASS ทั้ง PASS_DNA_ZERO และ PASS_THRESHOLD → ΔAₙ = 0, Aₙ ค้าง) "
+            "ควรแก้ engine ต้นทางด้วย"))
+    # นับจาก audit ทั้ง chain: คำเตือน money fence ต้องไม่หายเพราะตัวกรองวัน
+    if pending := pending_broker_fee_count(view.audit_rows()):
+        st.warning(f"มี {pending} fill ที่ broker fee ยังเป็น PENDING — "
+                   "ระบบไม่ถือเป็นศูนย์และยังไม่ปลด money fence จนกว่าจะกระทบยอด"
+                   + (" (นับทั้ง chain ไม่ขึ้นกับวันที่เลือก)" if len(rows) < len(view.ledger) else ""))
+    for note in view.notes:
+        st.warning(note)
+
+
+def render_audit(view: ChainView, rows: list[int]) -> None:
+    """Order audit (redacted) ของแถวที่ตัวกรองวันแสดง (วันของ order = วันของแถวที่ order ผูกอยู่)"""
+    chain_adf = view.audit_rows()
+    if chain_adf.empty:
+        return
+    st.subheader("Order audit", anchor=False)
+    shown = view.ledger.iloc[rows]
+    adf = (filter_audit_rows(view.audit, shown["run_id"] if "run_id" in shown.columns else [])
+           if len(rows) < len(view.ledger) else chain_adf)
+    if adf.empty:
+        st.caption(f"ไม่มี order ในวันที่เลือก — เลือก “{ALL_DAYS}” เพื่อดู order ทั้ง chain")
+        return
+    adf = audit_with_ledger_time(adf, shown)
+    first = [name for name in ("เวลา (UTC)", "run_id", "status", "reject_reason",
+                               "terminal_reason", "filled_quantity", "broker_fee_status")
+             if name in adf]
+    st.dataframe(adf[first + [name for name in adf if name not in first]], width="stretch")
+
+
+def render_data_tab(snap: Snapshot, view: ChainView, rows: list[int], paper: bool) -> None:
+    """การ์ด 5 metric → คำอธิบาย semantics → ตาราง 17 คอลัมน์ → Order audit → Integrity → State"""
+    latest = view.ledger.iloc[-1]          # fmt_num/fmt_text: null -> "—" ไม่ล่ม
+    total_value, total_help = snap.memo("total_metric", lambda: excess_total_metric(
+        snap.rows, snap.state, paper))
+    cards = st.columns(5)
+    cards[0].metric("สถานะตัดสินใจล่าสุด" if view.execution_mode else "สถานะล่าสุด",
+                    fmt_text(latest.get("สถานะ")))
+    cards[1].metric("DNA step", fmt_num(latest.get("DNA step"), 0))
+    cards[2].metric("Pₙ (USD)", fmt_num(latest.get("ราคา Pₙ (USD)")))
+    cards[3].metric("Eₙ สะสม (USD)", fmt_num(latest.get("Eₙ ส่วนเกินสะสม (USD)")))
+    cards[4].metric(TOTAL_EXCESS_LABEL, total_value, help=total_help)
+    if view.frozen_v2_mode and (mark := fmt_num(latest.get("E_mark_at_observation"))) != "—":
+        st.caption(f"E_mark ล่าสุด: {mark} USD · "
+                   "Eₙ เป็นค่าที่ freeze จาก terminal fill และ dashboard ไม่คำนวณทับ")
+    if view.execution_mode:
+        st.caption(f"Execution cashflow ล่าสุด: {fmt_text(latest.get('cashflow_status'))} · "
+                   "READY_BUY/READY_SELL คือ decision intent ไม่ใช่หลักฐานว่า fill แล้ว")
+        st.caption("execution_confirmed_v1: act เฉพาะ cashflow_status=FINALIZED ที่มี "
+                   "execution_quantity และ execution_price > 0 · ΔAₙ ใช้ราคาที่ fill จริง; "
+                   "pending/rejected/PASS แช่แข็ง Aₙ/P_acted · Rₙ ยังวิ่งตาม quote Pₙ ทุกแถว")
+    else:
+        st.caption("gated_theoretical_v2: แถว act (READY_BUY/SELL) ΔAₙ = FIX_C×(Pₙ/P_acted−1) "
+                   "เทียบราคาแถว act ล่าสุด · แถว pass (ไม่เทรด — PASS_DNA_ZERO หรือ PASS_THRESHOLD, "
+                   "จำนวนสั่ง = 0) ΔAₙ = 0, Aₙ ค้าง, Eₙ ค้างค่า act ล่าสุด (smooth) — Eₙ ไม่ลดและ ≥ 0 เสมอ")
+    if view.leaps:
+        st.caption("LEAPS แทนหุ้น: จำนวนถือครอง = หุ้นจริง + LEAPS (หุ้นจำลอง, 1 สัญญา = 100) — "
+                   f"แถวล่าสุด {view.leaps['text']} · SELL ได้ไม่เกินหุ้นจริง · LEAPS เปลี่ยนกลาง chain "
+                   f"{view.leaps['changes']} ครั้ง (บันทึกที่แถวนั้นใน leaps_shares_changed_from)")
+    with safe_section("แสดงตาราง 17 คอลัมน์"):
+        render_ledger_table(view, rows)
+    with safe_section("แสดง Order audit"):
+        render_audit(view, rows)
+
+    # Integrity ตรวจค่าที่ DB บันทึก (ก่อน recompute เพื่อแสดง) — O(n²) จึงคำนวณเมื่อเปิดเท่านั้น
+    with st.expander("🔎 Integrity E1–E8", key="live_integrity", on_change="rerun") as box:
+        if box.open:
+            with safe_section("ตรวจ Integrity"), st.spinner("กำลังตรวจสมการ"):
+                report, ok = view.integrity()
+                st.dataframe(report, width="stretch")
+                if ok:
+                    st.success("ข้อมูลที่บันทึกผ่านการตรวจสมการในช่วงที่โหลด — "
+                               "ไม่ใช่การรับรองความพร้อมเทรดเงินจริง")
+                else:
+                    st.error("พบแถวที่ไม่สอดคล้องสมการ — ตรวจ chain/engine ก่อนเชื่อกราฟ")
+
+    if entry := snap.entry(view.key):
+        with st.expander("State pointer"):
+            st.dataframe(state_table(entry), width="stretch")
+
+
+def render_chart_tab(snap: Snapshot, view: ChainView, rows: list[int], paper: bool) -> None:
+    """กราฟ Rₙ / Aₙ / Eₙ ของ chain ตามตัวกรองวัน → กราฟ Eₙ ผลรวมทุกตัวตามเวลา"""
+    st.subheader("Rₙ / Aₙ / Eₙ", anchor=False)
+    with safe_section("สร้างกราฟ Rₙ / Aₙ / Eₙ"):
+        st.plotly_chart(live_ledger_figure(view.ledger.iloc[rows]), theme=None,
+                        config=PLOTLY_CONFIG, key="live_ledger_chart")
+        st.caption("จุดบนเส้น Aₙ = แถว act (ΔAₙ ≠ 0) · ชี้เมาส์ดูค่าทุกเส้น ณ DNA step นั้น "
+                   "พร้อมเวลา (UTC) และสถานะ · ลากเพื่อซูม ดับเบิลคลิกเพื่อรีเซ็ต")
+    render_total_excess(snap, paper)
+
+
+def _render_live(snap: Snapshot, paper: bool, now: pd.Timestamp) -> None:
+    render_health(snap)
+    if snap.rows.empty:
+        render_header("Live", snap.freshness(None, now), snap.fetched_at, None, now)
+        st.info("ยังไม่มีแถว committed — รอ Cloud Function รอบแรก")
+        return
+    chain = render_chain_picker(snap)       # อยู่เหนือทุกอย่าง: chain ที่เสียยังสลับไปตัวอื่นได้
+    render_header(" · ".join(part for part in (snap.symbol(chain), "Live") if part),
+                  snap.freshness(chain, now), snap.fetched_at, chain, now)
+    view = snap.chain_view(chain)
+    rows = render_day_filter(view.ledger, chain, paper)
+    render_alerts(view, rows)
+    # on_change="rerun" -> .open บอกแท็บที่เปิดอยู่ จึงรันเฉพาะแท็บนั้น (สลับแท็บ = rerun แค่ fragment นี้)
+    tab_data, tab_chart = st.tabs(["ข้อมูล", "กราฟ"], key="live_view", on_change="rerun")
+    if tab_data.open:
+        with tab_data:
+            render_data_tab(snap, view, rows, paper)
+    if tab_chart.open:
+        with tab_chart:
+            render_chart_tab(snap, view, rows, paper)
+
+
+@st.fragment
+def live_panel(snap: Snapshot, paper: bool) -> None:
+    """เนื้อหาแท็บ Live — widget ข้างในทำให้ rerun แค่ส่วนนี้บน ``snap`` เดิม (ไม่อ่าน Firebase ซ้ำ)"""
+    try:
+        _render_live(snap, paper, pd.Timestamp.now(tz="UTC"))
+    except Exception as exc:       # ไม่ขึ้น traceback และไม่พาอีก 3 แท็บหาย (Chain ยังสลับได้จากด้านบน)
+        st.error(f"แสดงหน้า Live ไม่ได้ ({type(exc).__name__}: {exc})")
+
+
 def render_live_dashboard(paper: bool = False) -> None:
     # แท็บนี้ต้องมี Firebase — ไม่มี secrets ก็แค่แจ้ง แล้วไม่ล้มทั้งหน้า (แท็บ 101 ยังใช้ได้)
     if not _secrets_ready():
         st.info("ตั้ง st.secrets: FIREBASE_SA_JSON และ FIREBASE_DB_URL หรือ FIREBASE_DB_URL_PAPER ก่อน จึงจะเห็น "
                 "ข้อมูลสด — ระหว่างนี้เปิดแท็บ 🎓 Rebalancing 101 เพื่อลอง gated demo ได้เลย")
         return
-    _init()
-
-    health = _lego_dash_core.system_health_rows(
-        _ref("webull_lego_warnings", paper).get())
-    if not health.empty:
-        if health["state"].eq("ACTIVE").any():
-            st.error("ระบบพักการทำงานจากปัญหา Authentication — ตรวจ credentials/token และเวลาลองใหม่")
-        with st.expander("System health — สถานะปัจจุบันและประวัติ", expanded=True):
-            st.dataframe(health, width="stretch")
-            st.caption("RESOLVED/HISTORY เป็นประวัติ ไม่ใช่หลักฐานว่าบัญชีพร้อมเทรดเงินจริง")
-
-    state = _ref(STATE_PATH, paper).get() or {}
-    if state:
-        st.subheader("State pointer (anchor ปัจจุบัน)")
-        st.dataframe(pd.DataFrame(state).T, width="stretch")
-
-    df = load_rows(paper)
-    if df.empty:
-        st.info("ยังไม่มีแถว committed — รอ Cloud Function รอบแรก")
+    try:
+        _init()
+        with st.spinner("กำลังโหลดข้อมูล"):
+            # อ่านที่นี่ที่เดียว (รันเต็มสคริปต์) — การกด widget ในแท็บนี้ rerun แค่ live_panel
+            snap = fetch_snapshot(lambda path: _ref(path, paper).get())
+    except Exception as exc:
+        now = pd.Timestamp.now(tz="UTC")
+        render_header("Live", Freshness(ERROR, None, None, "โหลดข้อมูลไม่ได้"), now, None, now)
+        detail = str(exc) if isinstance(exc, SnapshotError) else f"{type(exc).__name__}: {exc}"
+        st.error(f"โหลดข้อมูลไม่ได้ — {detail} · กด รีเฟรช เพื่อลองใหม่")
         return
-    # Eₙ ผลรวมทุกตัวใช้ทุก chain ของฐานข้อมูลนี้ จึงคำนวณก่อนเลือก chain (แสดงในแถว metric ด้านล่าง)
-    total_value, total_help = excess_total_metric(df, state, paper)
-    render_total_excess(df, state, paper)
-
-    # เลือก chain ก่อน — กัน step ซ้ำข้าม chain ปนกราฟ
-    chains = sorted(df["chain_key"].dropna().unique()) if "chain_key" in df else []
-    if len(chains) > 1:
-        # default = chain ที่ active ล่าสุดตาม state.updated_at (ไม่ใช่เรียงอักษร)
-        selected = st.selectbox("Chain", chains,
-                                index=default_chain_index(chains, state))
-        df = df[df["chain_key"] == selected]
-    elif chains:
-        selected = chains[0]
-        st.caption(f"Chain: {chains[0]}")
-    else:
-        selected = None
-    if selected and isinstance(state, dict) and (state.get(selected) or {}).get("paper"):
-        # ตีตราจาก backend (LEGO_MODE=paper) — ขึ้นแม้ chain paper จะไปอยู่ผิด database
-        st.markdown(":orange-background[**PAPER**] chain นี้: จำนวนหุ้นและ fill เป็นการจำลอง "
-                    "(Preview จริง ไม่เคย Place) ไม่ใช่เงินจริง")
-
-    execution_mode = ("semantics" in df.columns
-                      and df["semantics"].astype(str).isin([
-                          EXECUTION_CONFIRMED_SEMANTICS,
-                          *FROZEN_TERMINAL_SEMANTICS]).any())
-    frozen_v2_mode = ("semantics" in df.columns
-                      and df["semantics"].astype(str)
-                      .isin(FROZEN_TERMINAL_SEMANTICS).any())
-
-    # P₀ จาก state pointer (chain ตัดหน้า) — genesis จะ fallback = ราคาแถวแรกใน recompute
-    p0_hint = chain_p0_hint(state, selected)
-
-    # dashboard เป็น read-only: derive recurrence ใหม่ตาม semantics ก่อนแสดงเสมอ;
-    # v2 ใช้ decision ส่วน v3 ใช้เฉพาะหลักฐาน broker fill ที่ FINALIZED.
-    persisted_df = df.copy(deep=True)
-    df_fixed = recompute_gated_ledger(df, p0=p0_hint)
-    n_corr = count_ledger_corrections(df, df_fixed)
-    if n_corr:
-        if execution_mode:
-            st.warning(
-                f"⚠️ engine เขียน ledger ไม่ตรง execution-confirmed contract {n_corr} แถว "
-                "— ตาราง/กราฟด้านล่างคำนวณใหม่จาก fill ที่ FINALIZED เท่านั้น; "
-                "pending/rejected/PASS แช่แข็ง ควรตรวจ engine และ order audit ต้นทาง"
-            )
-        else:
-            st.warning(
-                f"⚠️ engine เขียน ledger ผิด {n_corr} แถว (แถว PASS ที่ยัง act — ΔAₙ ≠ 0) "
-                "— ตาราง/กราฟด้านล่างถูก **คำนวณใหม่ตามหลักการแช่แข็ง** (ทุก PASS ทั้ง "
-                "PASS_DNA_ZERO และ PASS_THRESHOLD → ΔAₙ = 0, Aₙ ค้าง) ควรแก้ engine ต้นทางด้วย"
-            )
-
-    # n = 0 เป็นจุดตั้งต้น (R₀ = ΔA₀ = A₀ = E₀ = 0): fill แรกของ chain ไม่ book slippage (quote → fill) เป็นกำไร.
-    # ส่วนนี้เป็นการ "แสดง" เท่านั้น — ไม่แก้ DB; ค่าที่ DB บันทึกยังอยู่ใน persisted_df (tooltip + Integrity check)
-    # ไม่มีป้ายแจ้งบนหน้า (เจ้าของขอปิด): ค่าที่ DB บันทึกและจำนวนที่ปรับดูได้จาก tooltip ของตาราง
-    df = recompute_gated_ledger(persisted_df, p0=p0_hint, genesis_baseline=True)
-
-    latest = df.iloc[-1]
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("สถานะตัดสินใจล่าสุด" if execution_mode else "สถานะล่าสุด",
-              latest.get("สถานะ", "—"))
-    c2.metric("DNA step", int(latest.get("DNA step", 0)))
-    c3.metric("Pₙ (USD)", f"{float(latest.get('ราคา Pₙ (USD)', 0)):.2f}")
-    c4.metric("Eₙ สะสม (USD)", f"{float(latest.get('Eₙ ส่วนเกินสะสม (USD)', 0)):.2f}")
-    c5.metric(TOTAL_EXCESS_LABEL, total_value, help=total_help)
-    if frozen_v2_mode and latest.get("E_mark_at_observation") is not None:
-        st.caption(
-            f"E_mark ล่าสุด: {float(latest['E_mark_at_observation']):.2f} USD · "
-            "Eₙ เป็นค่าที่ freeze จาก terminal fill และ dashboard ไม่คำนวณทับ")
-
-    if execution_mode:
-        st.caption(
-            f"Execution cashflow ล่าสุด: {latest.get('cashflow_status', '—')} · "
-            "READY_BUY/READY_SELL คือ decision intent ไม่ใช่หลักฐานว่า fill แล้ว"
-        )
-        st.subheader("Recurrence: Rₙ (อ้างอิง) vs Aₙ (execution-confirmed) vs Eₙ (smooth)")
-        st.caption(
-            "execution_confirmed_v1: act เฉพาะ cashflow_status=FINALIZED ที่มี "
-            "execution_quantity และ execution_price > 0 · ΔAₙ ใช้ราคาที่ fill จริง; "
-            "pending/rejected/PASS แช่แข็ง Aₙ/P_acted · Rₙ ยังวิ่งตาม quote Pₙ ทุกแถว"
-        )
-    else:
-        st.subheader("Recurrence: Rₙ (อ้างอิง) vs Aₙ (gated ledger) vs Eₙ (smooth)")
-        st.caption(
-            "gated_theoretical_v2: แถว act (READY_BUY/SELL) ΔAₙ = FIX_C×(Pₙ/P_acted−1) "
-            "เทียบราคาแถว act ล่าสุด · แถว pass (ไม่เทรด — PASS_DNA_ZERO หรือ PASS_THRESHOLD, "
-            "จำนวนสั่ง = 0) ΔAₙ = 0, Aₙ ค้าง, Eₙ ค้างค่า act ล่าสุด (smooth) — Eₙ ไม่ลดและ ≥ 0 เสมอ"
-        )
-    # ตัวกรองวัน (UTC): df คำนวณจากทั้ง chain แล้ว — view แค่เลือกแถวที่แสดงในกราฟ ตาราง และ Order audit
-    rows = render_day_filter(df, selected, paper)
-    view = df.iloc[rows]
-    st.plotly_chart(live_ledger_figure(view), theme=None, config=PLOTLY_CONFIG,
-                    key="live_ledger_chart")
-    st.caption("จุดบนเส้น Aₙ = แถว act (ΔAₙ ≠ 0) · ชี้เมาส์ดูค่าทุกเส้น ณ DNA step นั้น "
-               "พร้อมเวลา (UTC) และสถานะ · ลากเพื่อซูม ดับเบิลคลิกเพื่อรีเซ็ต")
-
-    st.subheader("ตาราง 17 คอลัมน์ (round 2dp)")
-    leaps = leaps_summary(persisted_df)
-    if leaps:
-        st.caption(
-            "LEAPS แทนหุ้น: จำนวนถือครอง = หุ้นจริง + LEAPS (หุ้นจำลอง, 1 สัญญา = 100) — "
-            f"แถวล่าสุด {leaps['text']} · SELL ได้ไม่เกินหุ้นจริง · LEAPS เปลี่ยนกลาง chain "
-            f"{leaps['changes']} ครั้ง (บันทึกที่แถวนั้นใน leaps_shares_changed_from)")
-    show = order_columns(view.copy())
-    for col in MONEY_COLS:
-        if col in show:
-            show[col] = show[col].astype(float).round(2)
-    render_ledger_table(show, persisted_df, p0_hint, rows)
-
-    # Audit the persisted evidence, before any display-only recomputation.
-    with st.expander("🔎 Integrity check — สมการ LEGO (E1–E8)", expanded=False):
-        report, ok = integrity_report(persisted_df, p0_hint=p0_hint)
-        st.dataframe(report, width="stretch")
-        if ok:
-            st.success("ข้อมูลที่บันทึกผ่านการตรวจสมการในช่วงที่โหลด — ไม่ใช่การรับรองความพร้อมเทรดเงินจริง")
-        else:
-            st.error("พบแถวที่ไม่สอดคล้องสมการ — ตรวจ chain/engine ก่อนเชื่อกราฟ")
-
-    # audit เฉพาะ chain ที่เลือก — ผูกด้วย run_id กัน order ข้าม chain ปนตาราง
-    audit = _ref(AUDIT_PATH, paper).get() or {}
-    if audit:
-        chain_adf = filter_audit_rows(audit, df["run_id"] if "run_id" in df.columns else [])
-        if not chain_adf.empty:
-            st.subheader("Order audit (redacted)")
-            filtered = len(rows) < len(df)
-            # นับจาก audit ทั้ง chain: คำเตือน money fence ต้องไม่หายเพราะตัวกรองวัน
-            pending_fees = pending_broker_fee_count(chain_adf)
-            if pending_fees:
-                st.warning(
-                    f"มี {pending_fees} fill ที่ broker fee ยังเป็น PENDING — "
-                    "ระบบไม่ถือเป็นศูนย์และยังไม่ปลด money fence จนกว่าจะกระทบยอด"
-                    + (" (นับทั้ง chain ไม่ขึ้นกับวันที่เลือก)" if filtered else ""))
-            # ตารางแสดงเฉพาะ order ของแถวที่ตัวกรองวันแสดง (วันของ order = วันของแถวที่ order ผูกอยู่)
-            adf = (filter_audit_rows(audit, view["run_id"] if "run_id" in view.columns else [])
-                   if filtered else chain_adf)
-            if adf.empty:
-                st.caption(f"ไม่มี order ในวันที่เลือก — เลือก “{ALL_DAYS}” เพื่อดู order ทั้ง chain")
-            else:
-                adf = audit_with_ledger_time(adf, view)
-                diagnostic_columns = [name for name in ("เวลา (UTC)", "run_id", "status", "reject_reason",
-                                      "terminal_reason", "filled_quantity", "broker_fee_status")
-                                      if name in adf]
-                st.dataframe(adf[diagnostic_columns + [name for name in adf if name not in diagnostic_columns]],
-                             width="stretch")
+    live_panel(snap, paper)
 
 
 def render_rebalancing_101() -> None:
