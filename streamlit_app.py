@@ -223,7 +223,7 @@ def render_total_excess(rows: pd.DataFrame, state, paper: bool) -> None:
 
     ``rows`` = ทุกแถวของฐานข้อมูลนี้ (ก่อนเลือก chain) · ส่วนเสริม ห้ามทำให้หน้าล่ม
     """
-    st.subheader("📈 Eₙ ผลรวมทุกตัว ตามเวลา")
+    st.subheader("Eₙ ผลรวมทุกตัว ตามเวลา")
     try:
         timeline = excess_total_timeline(rows, state, paper_page=paper)
         if timeline.empty:
