@@ -8,8 +8,8 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from lego_charts import (ACT_NAME, LEDGER_NAMES, MAX_ACT_MARKERS, OTHER_NAME,
-                         THEME_TOKENS, TOTAL_NAME, _spread, ledger_figure,
+from lego_charts import (ACT_NAME, LEDGER_NAMES, MAX_ACT_MARKERS, MAX_LINE_POINTS, OTHER_NAME,
+                         THEME_TOKENS, TOTAL_NAME, _spread, downsample_positions, ledger_figure,
                          total_excess_figure)
 from lego_dash_core import (TOTAL_EXCESS_COL, excess_total_timeline, latest_excess_total,
                             rows_to_df)
@@ -154,3 +154,40 @@ def test_spread_keeps_order_and_min_gap():
     order = sorted(range(4), key=lambda i: [5.0, 5.1, -3.0, 5.05][i])
     ys = [placed[i] for i in order]
     assert all(b - a >= 1.0 - 1e-12 for a, b in zip(ys, ys[1:]))
+
+
+# --------------------------------------------------------------------------- downsample (แสดงผลเท่านั้น)
+
+def test_downsample_keeps_short_series_and_always_keeps_first_last_and_kept_rows():
+    assert downsample_positions(10, limit=10) == list(range(10))
+    assert downsample_positions(0) == []
+    pick = downsample_positions(10_000, limit=100, keep=[5, 5_000, 9_998])
+    assert pick == sorted(set(pick)) and pick[0] == 0 and pick[-1] == 9_999
+    assert {5, 5_000, 9_998} <= set(pick) and 100 <= len(pick) <= 103
+    dense = downsample_positions(10_000, limit=100, keep=range(0, 10_000, 2))
+    assert len(dense) <= 200 and dense[-1] == 9_999        # keep ที่เกิน limit ถูกเลือกแบบห่างเท่ากัน
+
+
+def test_a_long_ledger_draws_fewer_points_with_the_same_values_and_act_rows():
+    n = MAX_LINE_POINTS * 3
+    xs = list(range(n))
+    acts = {7, n // 2, n - 2}
+    fig = ledger_figure(xs, [0.5 * x for x in xs], [2.0 * x for x in xs], [1.0 * x for x in xs],
+                        acted=[x in acts for x in xs], hover_text=[f"row {x}" for x in xs])
+    traces = {trace.name: trace for trace in fig.data}
+    a = traces[LEDGER_NAMES[1]]
+    assert len(a.x) <= MAX_LINE_POINTS + len(acts) and a.x[0] == 0 and a.x[-1] == n - 1
+    assert list(a.y) == [2.0 * x for x in a.x]                       # ค่าจริงของแถวที่วาด
+    assert list(a.customdata) == [f"row {x}" for x in a.x]           # hover ตรงจุด
+    assert list(traces[ACT_NAME].x) == sorted(acts)                  # จุด act ครบ
+    assert [ann.text for ann in fig.layout.annotations][-1].endswith(f"<b>{n - 1:+,.2f}</b>")
+    short = ledger_figure([0, 1, 2], [0, 1, 2], [0, 1, 2], [0, 1, 2])
+    assert list(short.data[0].x) == [0, 1, 2]
+
+
+def test_a_long_total_timeline_ends_at_the_same_total():
+    index = pd.date_range("2026-01-05", periods=MAX_LINE_POINTS * 2, freq="15min", tz="UTC")
+    values = [float(i) for i in range(len(index))]
+    timeline = pd.DataFrame({"AAPL": values, TOTAL_EXCESS_COL: values}, index=index)
+    total = next(t for t in total_excess_figure(timeline).data if t.name == TOTAL_NAME)
+    assert len(total.y) == MAX_LINE_POINTS and total.y[0] == 0.0 and total.y[-1] == values[-1]

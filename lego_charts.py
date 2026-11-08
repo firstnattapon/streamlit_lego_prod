@@ -3,6 +3,7 @@
 แยกจาก streamlit_app.py เพื่อให้ test figure ได้ตรง ๆ:
   - ledger_figure        : Rₙ (อ้างอิง) vs Aₙ vs Eₙ ของ chain เดียว (Live + Rebalancing 101)
   - total_excess_figure  : Σ Eₙ รวมทุกหุ้น + เส้นรายหุ้น ตามเวลา (UTC)
+  - downsample_positions : ลดจำนวนจุดที่ "วาด" เมื่อเกิน ``MAX_LINE_POINTS`` (ข้อมูล/ตัวเลขไม่เปลี่ยน)
 
 กติกาการออกแบบ (dataviz): แกน y เดียว, เส้นบาง 1–2px (ค่าใน ``LINE``), จุด act 5px มีวงขอบสีพื้น, ตัวหนังสือใช้สี
 text token ไม่ใช้สีเส้น, grid จาง, hover แบบ crosshair, legend เมื่อมี ≥ 2 series และ
@@ -56,6 +57,8 @@ TOTAL_NAME = "Σ Eₙ รวม"
 OTHER_NAME = "อื่น ๆ"
 TOTAL_COL = "รวม"                 # ต้องตรงกับ lego_dash_core.TOTAL_EXCESS_COL
 MAX_ACT_MARKERS = 60              # มากกว่านี้จุดจะทับกันจนอ่านไม่ออก -> แสดงเฉพาะเส้น
+# เกินนี้ต่อเส้น -> วาดเฉพาะจุดตัวแทน (จอกว้างไม่กี่พันพิกเซล จุดที่เกินแค่ทำให้ payload/การวาดช้า)
+MAX_LINE_POINTS = 1500
 # ความหนาเส้น (px) / ขนาดจุด / ความทึบพื้นที่ใต้เส้น — ปรับที่นี่ที่เดียว
 # เส้นบางแบบกราฟการเงิน: เส้นอ้างอิงบางสุด, เส้นผลรวมหนาสุดเพื่อให้ยังเด่นกว่าเส้นรายหุ้น
 LINE = {
@@ -147,6 +150,24 @@ def _direct_labels(fig: go.Figure, tok: dict, x_last, items: list[tuple[str, flo
                                      color=tok["text_primary"]))
 
 
+def downsample_positions(n: int, limit: int = MAX_LINE_POINTS,
+                         keep: Sequence[int] = ()) -> list[int]:
+    """ตำแหน่งจุดที่วาด (เรียงจากน้อยไปมาก): ``n ≤ limit`` -> ทุกจุด; เกิน -> ``limit`` จุดห่างเท่ากัน
+    (มีจุดแรกและจุดท้ายเสมอ) รวมกับ ``keep`` (เช่น แถว act — ถ้ามีเกิน ``limit`` ก็เลือกแบบห่างเท่ากันเช่นกัน)
+
+    เป็นการแสดงผลเท่านั้น: ค่าที่วาดคือค่าจริงของแถวที่เลือก ไม่มีการเฉลี่ยหรือประมาณค่า
+    """
+    limit = max(int(limit), 2)
+    if n <= limit:
+        return list(range(n))
+    step = (n - 1) / (limit - 1)
+    picked = {round(i * step) for i in range(limit)}
+    keep = sorted({int(k) for k in keep if 0 <= int(k) < n})
+    if len(keep) > limit:
+        keep = [keep[round(i * (len(keep) - 1) / (limit - 1))] for i in range(limit)]
+    return sorted(picked.union(keep))
+
+
 def ledger_figure(x: Sequence, r: Sequence[float], a: Sequence[float],
                   e: Sequence[float], *, acted: Sequence[bool] | None = None,
                   hover_text: Sequence[str] | None = None, x_title: str = "DNA step",
@@ -154,10 +175,18 @@ def ledger_figure(x: Sequence, r: Sequence[float], a: Sequence[float],
     """Rₙ (เส้นประอ้างอิง) vs Aₙ (+ จุด act) vs Eₙ (เส้นหลักพร้อมพื้นที่ใต้เส้น)
 
     ``acted``: True = แถวที่ act (เทรดจริง) — แสดงเป็นจุดบนเส้น Aₙ (ไม่เกิน
-    ``MAX_ACT_MARKERS`` จุด); ``hover_text``: ข้อความเสริมต่อแถว เช่น เวลา + สถานะ
+    ``MAX_ACT_MARKERS`` จุด); ``hover_text``: ข้อความเสริมต่อแถว เช่น เวลา + สถานะ.
+    เกิน ``MAX_LINE_POINTS`` แถว -> วาดเฉพาะ ``downsample_positions`` (แถว act คงอยู่ครบ)
     """
     tok = theme_tokens(theme)
     xs, rs, as_, es = list(x), [float(v) for v in r], [float(v) for v in a], [float(v) for v in e]
+    flags = None if acted is None else [bool(v) for v in acted]
+    hover = None if hover_text is None else list(hover_text)
+    if len(xs) > MAX_LINE_POINTS:
+        pick = downsample_positions(len(xs), keep=[i for i, f in enumerate(flags or []) if f])
+        xs, rs, as_, es = ([seq[i] for i in pick] for seq in (xs, rs, as_, es))
+        flags = None if flags is None else [flags[i] for i in pick]
+        hover = None if hover is None else [hover[i] for i in pick]
     r_name, a_name, e_name = LEDGER_NAMES
     blue, orange = tok["series"][0], tok["series"][1]
     fig = go.Figure()
@@ -166,20 +195,19 @@ def ledger_figure(x: Sequence, r: Sequence[float], a: Sequence[float],
         line=dict(color=tok["text_secondary"], width=LINE["reference"], dash=REFERENCE_DASH),
         hovertemplate=f"{r_name}: {USD}<extra></extra>"))
     a_template = f"{a_name}: {USD}"
-    if hover_text is not None:
+    if hover is not None:
         a_template += "<br><span style='font-size:12px'>%{customdata}</span>"
     fig.add_trace(go.Scatter(
         x=xs, y=as_, name=a_name, mode="lines",
         line=dict(color=blue, width=LINE["actual"]),
-        customdata=list(hover_text) if hover_text is not None else None,
+        customdata=hover,
         hovertemplate=a_template + "<extra></extra>"))
     fig.add_trace(go.Scatter(
         x=xs, y=es, name=e_name, mode="lines",
         line=dict(color=orange, width=LINE["excess"]),
         fill="tozeroy", fillcolor=_rgba(orange, FILL_ALPHA["excess"]),
         hovertemplate=f"{e_name}: {USD}<extra></extra>"))
-    if acted is not None:
-        flags = [bool(v) for v in acted]
+    if flags is not None:
         if 0 < sum(flags) <= MAX_ACT_MARKERS:
             fig.add_trace(go.Scatter(
                 x=[v for v, f in zip(xs, flags) if f],
@@ -218,6 +246,8 @@ def total_excess_figure(timeline: pd.DataFrame, *, theme: str | None = None,
     """
     tok = theme_tokens(theme)
     fig = go.Figure()
+    if len(timeline) > MAX_LINE_POINTS:            # วาดเฉพาะจุดตัวแทน (จุดแรก/ท้ายคงอยู่ ค่าปลายเส้นจึงเท่าเดิม)
+        timeline = timeline.iloc[downsample_positions(len(timeline))]
     x = list(timeline.index)
     per_symbol = _fold_symbols(timeline, len(tok["series"]))
     labels: list[tuple[str, float]] = []
