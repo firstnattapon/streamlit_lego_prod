@@ -39,6 +39,14 @@ def app(**secrets):
     return page
 
 
+def open_integrity(page: AppTest) -> AppTest:
+    """Integrity E1–E8 runs only while its expander is open (it is O(n²)): open it for the next run,
+    as a click would. AppTest keeps a seeded expander/tab state for one run only — the browser
+    sends it with every rerun — so seed it right before the run that reads it."""
+    page.session_state["live_integrity"] = True
+    return page
+
+
 def test_without_a_paper_database_the_page_is_prod_only(monkeypatch):
     databases(monkeypatch, prod={})
     page = app()
@@ -54,7 +62,8 @@ def test_the_paper_view_reads_the_paper_database_and_says_so(monkeypatch):
     page.run(timeout=30)
     assert page.sidebar.radio[0].value == "PROD"                    # PROD stays the default
     assert {url for _, url in calls} == {None}
-    page.sidebar.radio[0].set_value("PAPER (จำลอง)").run(timeout=30)
+    page.sidebar.radio[0].set_value("PAPER (จำลอง)")
+    open_integrity(page).run(timeout=30)
     assert not page.exception
     assert {url for _, url in calls if url} == {PAPER_URL}
     texts = [m.value for m in page.markdown]
@@ -88,7 +97,7 @@ def test_the_paper_ledger_needs_no_recompute():
 def test_the_paper_database_alone_is_enough(monkeypatch):
     calls = []
     databases(monkeypatch, prod=None, paper=PAPER, calls=calls)
-    page = AppTest.from_file(str(ROOT / "streamlit_app.py"))
+    page = open_integrity(AppTest.from_file(str(ROOT / "streamlit_app.py")))
     page.secrets.update({"FIREBASE_SA_JSON": "{}", "FIREBASE_DB_URL_PAPER": PAPER_URL})
     page.run(timeout=30)
     assert not page.exception and not page.sidebar.radio            # nothing to switch to

@@ -18,7 +18,7 @@ from lego_dash_core import (COLUMN_ORDER, HOLDINGS_COL, LEDGER_COLS, META_COLS, 
                             ledger_explanations, order_columns, recompute_gated_ledger,
                             rows_to_df, table_tooltips)
 from lego_hover_table import build_hover_table_html
-from test_paper_view import PAPER, PAPER_URL, app, databases
+from test_paper_view import PAPER, PAPER_URL, app, databases, open_integrity
 
 ROOT = Path(__file__).parent
 LEAPS = json.loads((ROOT / "fixtures" / "paper_session_leaps.json").read_text(encoding="utf-8"))
@@ -120,7 +120,8 @@ def test_the_paper_view_explains_the_leaps(monkeypatch):
     databases(monkeypatch, prod={}, paper=LEAPS)
     page = app(FIREBASE_DB_URL_PAPER=PAPER_URL)
     page.run(timeout=30)
-    page.sidebar.radio[0].set_value("PAPER (จำลอง)").run(timeout=30)
+    page.sidebar.radio[0].set_value("PAPER (จำลอง)")
+    open_integrity(page).run(timeout=30)
     assert not page.exception
     captions = [c.value for c in page.caption]
     assert any("LEAPS แทนหุ้น" in c and "หุ้นจริง 25.86 + LEAPS 20.0 = 45.86" in c

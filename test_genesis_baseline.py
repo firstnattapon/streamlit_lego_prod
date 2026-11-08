@@ -462,6 +462,7 @@ def _app(monkeypatch, df: pd.DataFrame) -> AppTest:
 
 def test_the_page_starts_the_numbers_from_zero_without_a_banner(monkeypatch):
     page = _app(monkeypatch, v3_chain(PLAIN))
+    page.session_state["live_integrity"] = True       # Integrity runs only while it is open
     page.run(timeout=30)
     assert not page.exception
     assert genesis_baseline_info(v3_chain(PLAIN), P0) is not None    # DB ยังบันทึก slippage ไว้จริง

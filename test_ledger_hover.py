@@ -328,4 +328,5 @@ def test_hover_failure_falls_back_to_dataframe_with_a_warning(live_app, monkeypa
     live_app.run(timeout=30)
     assert not live_app.exception
     assert any("explain exploded" in w.value for w in live_app.warning)
-    assert len(live_app.dataframe) >= 4
+    # the 17-column table is back as a st.dataframe
+    assert any("Aₙ สะสม (USD)" in d.value.columns for d in live_app.dataframe)

@@ -163,7 +163,16 @@ def day_box(page: AppTest):
 
 
 def chain_box(page: AppTest):
-    return next(box for box in page.selectbox if box.label == "Chain")
+    return next(box for box in page.radio if box.label == "Chain")
+
+
+def show_view(page: AppTest, view: str) -> AppTest:
+    """รันโดยเปิดแท็บ ข้อมูล/กราฟ ของหน้า Live (st.tabs key="live_view") แบบที่การคลิกทำ
+
+    AppTest จำสถานะแท็บที่ตั้งไว้แค่รอบเดียว (เบราว์เซอร์ส่งมากับทุก rerun) จึงตั้งก่อนทุกรอบที่อ่านกราฟ
+    """
+    page.session_state["live_view"] = view
+    return page.run(timeout=30)
 
 
 def metrics(page: AppTest) -> dict:
@@ -236,17 +245,24 @@ def test_the_day_filter_opens_on_the_latest_day_and_shows_rows_of_the_whole_chai
     window_tips, _ = table_tooltips(persisted.iloc[3:6], p0=P0, genesis_baseline=True)
     assert "แถวแรกของช่วงที่โหลด" in window_tips[0]["ΔAₙ ต่อสเต็ป (USD)"]
     assert "แถวแรกของช่วงที่โหลด" not in hover_html(page)
-    # กราฟ: DNA step ของวันล่าสุดเท่านั้น ค่าจาก ledger ทั้ง chain
-    assert list(charts[-1].index) == [3, 4, 5]
-    assert charts[-1][E].tolist() == pytest.approx(full[E].iloc[3:6].tolist())
     # Order audit: เฉพาะ order ของแถววันล่าสุด เรียงล่าสุดก่อน
     assert list(audit_table(page)["run_id"]) == [f"{CHAIN}-5", f"{CHAIN}-3"]
-
     before = metrics(page)
-    day_box(page).set_value(ALL_DAYS).run(timeout=30)
+    assert not charts                               # แท็บ ข้อมูล ไม่วาดกราฟ Live
+
+    # กราฟ: DNA step ของวันล่าสุดเท่านั้น ค่าจาก ledger ทั้ง chain — ตัวกรองวันใช้ร่วมกันทั้งสองแท็บ
+    show_view(page, "กราฟ")
+    assert not page.exception and day_box(page).value == DAY2
+    assert list(charts[-1].index) == [3, 4, 5]
+    assert charts[-1][E].tolist() == pytest.approx(full[E].iloc[3:6].tolist())
+    day_box(page).set_value(ALL_DAYS)
+    show_view(page, "กราฟ")
     assert not page.exception
-    assert metrics(page) == before                  # metric ใช้ทั้ง chain ไม่ขึ้นกับตัวกรอง
     assert list(charts[-1].index) == list(range(6))
+
+    show_view(page, "ข้อมูล")
+    assert not page.exception and day_box(page).value == ALL_DAYS
+    assert metrics(page) == before                  # metric ใช้ทั้ง chain ไม่ขึ้นกับตัวกรอง
     assert list(audit_table(page)["run_id"]) == [f"{CHAIN}-5", f"{CHAIN}-3", f"{CHAIN}-1"]
     tips_all = table_tooltips(persisted, p0=P0, genesis_baseline=True)[0]
     show_all = order_columns(full.copy())
