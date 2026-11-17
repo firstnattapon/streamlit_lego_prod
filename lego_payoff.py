@@ -637,6 +637,88 @@ def portfolio_lego(books: Sequence[SymbolBook], pcts: np.ndarray) -> pd.DataFram
     return out
 
 
+# ---------------------------------------------------------------- มุมมองแบบ 11 สมการ (แอป React)
+# R = สมการที่ 6 (Benchmark ไม่ถูกรวมใน Net) · deep call LEAPS = สมการที่ 5 (piecewise δ) · Payoff = สมการที่ 3 (Net = Σ Active)
+#   y₆ = 0 + FIX_C·ln(S/x₀₁)·δ₂
+#   y₅ = 0 + FIX_C·ln(S/x₀₁)·δ(S)   δ(S) = { S ≥ x₀₁ → δ₂ ; else → δ₁ }
+#   y₃ = Σ(เส้นที่ Active)            (y₆ ไม่ถูกรวม)
+# x₀₁ = P₀ ของ chain (R = 0 ตรงกับ Rₙ ของ LEGO) · δ₂ = 1.0 · bias = 0
+# δ₁ = (มูลค่า option ตอนนี้ + หุ้นจริง × ราคา) ÷ FIX_C  — โหมด Dynamic ของแอป React ด้วยค่าจาก Webull
+ELEVEN_NAMES = {"y6": "y₆ Benchmark (R)", "y5": "y₅ deep call LEAPS", "y3": "y₃ Net = Σ Active"}
+ELEVEN_SHORT = {"y6": "y₆", "y5": "y₅", "y3": "y₃"}
+ELEVEN_ACTIVE = ("y5",)          # เส้นที่รวมเป็น y₃ ได้ (y₆ เป็น Benchmark ไม่ถูกรวม)
+DELTA2 = 1.0
+
+
+@dataclass(frozen=True)
+class ElevenParams:
+    symbol: str
+    fix_c: float
+    x01: float                   # P₀ ของ chain = จุดสลับ δ และ anchor ของ y₆
+    delta1: float
+    delta2: float
+    option_value: float          # Σ option ยาว m·n·mark ตอนนี้
+    stock_value: float           # หุ้นจริง × S₀
+
+
+def eleven_params(book: SymbolBook) -> tuple[ElevenParams | None, str | None]:
+    """ค่าของสมการ 5/6 ต่อ symbol · ข้อมูลไม่พอ → (None, เหตุผล) (fail closed)"""
+    chain = book.usable_chain
+    if chain is None:
+        return None, book.chain_issue or f"{book.symbol}: ไม่มี chain ของ bot"
+    if not chain.p0:
+        return None, f"{book.symbol}: state ของ bot ไม่มี P₀ — วาดแบบ 11 สมการไม่ได้"
+    if book.spot is None:
+        return None, f"{book.symbol}: ไม่มีราคาหุ้น"
+    longs = [leg for leg in book.options if leg.qty > 0]
+    if any(leg.mark is None for leg in longs):
+        return None, f"{book.symbol}: ไม่มีราคา option สำหรับคิด δ₁"
+    option_value = float(sum(leg.multiplier * leg.qty * leg.mark for leg in longs))
+    stock_value = float(sum(leg.qty for leg in book.legs if leg.kind == "stock")) * book.spot
+    return ElevenParams(book.symbol, chain.fix_c, chain.p0, (option_value + stock_value) / chain.fix_c,
+                        DELTA2, option_value, stock_value), None
+
+
+def eleven_curves(params: ElevenParams, grid: np.ndarray, active: Iterable[str] = ELEVEN_ACTIVE) -> pd.DataFrame:
+    """price, y6, y5, y3 (= Σ Active · y₆ ไม่ถูกรวม)"""
+    S = np.asarray(grid, dtype=float)
+    base = params.fix_c * np.log(S / params.x01)
+    out = pd.DataFrame({PRICE_COL: S, "y6": base * params.delta2,
+                        "y5": base * np.where(S >= params.x01, params.delta2, params.delta1)})
+    out["y3"] = eleven_net(out, active)
+    return out
+
+
+def eleven_net(df: pd.DataFrame, active: Iterable[str]) -> np.ndarray:
+    """y₃ = Σ เส้นที่ Active (ไม่มี Active = 0) · Benchmark y₆ ไม่ถูกรวมเสมอ"""
+    keys = [k for k in active if k in ELEVEN_ACTIVE]
+    total = np.zeros(len(df))
+    for key in keys:
+        total = total + df[key].to_numpy(dtype=float)
+    return total
+
+
+def eleven_portfolio(books: Sequence[SymbolBook], pcts: np.ndarray,
+                     active: Iterable[str] = ELEVEN_ACTIVE) -> tuple[pd.DataFrame | None, list[str]]:
+    """รวมทุกตัวที่ใช้ได้ ณ % ของ S₀ เดียวกัน (แต่ละตัวใช้ P₀ / δ₁ ของตัวเอง) · คืน (df, เหตุผลของตัวที่ข้าม)"""
+    pcts = np.asarray(pcts, dtype=float)
+    out = pd.DataFrame({PCT_COL: pcts, "y6": 0.0, "y5": 0.0})
+    skipped, used = [], 0
+    for book in books:
+        params, issue = eleven_params(book)
+        if params is None:
+            skipped.append(issue)
+            continue
+        curves = eleven_curves(params, book.spot * pcts / 100.0, active)
+        out["y6"] += curves["y6"].to_numpy()
+        out["y5"] += curves["y5"].to_numpy()
+        used += 1
+    if not used:
+        return None, skipped
+    out["y3"] = eleven_net(out, active)
+    return out, skipped
+
+
 def break_evens(x: Sequence[float], y: Sequence[float]) -> list[float]:
     """จุดตัด 0 แบบ linear interpolate (ข้ามช่วงที่เป็น NaN)"""
     xs, ys = np.asarray(x, dtype=float), np.asarray(y, dtype=float)
@@ -966,4 +1048,49 @@ def lego_ledger_figure(df: pd.DataFrame, *, x_col: str = PRICE_COL, x_title: str
     fig.update_layout(updatemenus=_zoom_menu(tok, x, series, center, pct_axis, ([lo, hi], full_y)))
     _end_labels(fig, tok, hi, [("R", float(df["R"].iloc[-1])), ("A", float(df["A_floor"].iloc[-1]))],
                 _finite_span(df, ["R", "A_floor"]))
+    return fig
+
+
+def eleven_figure(df: pd.DataFrame, *, active: Sequence[str] = ELEVEN_ACTIVE, show_benchmark: bool = True,
+                  x01: float | None = None, spot: float | None = None, x_col: str = PRICE_COL,
+                  x_title: str = "ราคาหุ้น (USD)", x_start: float | None = None, theme: str | None = None,
+                  title: str | None = None, subtitle: str | None = None, height: int = 560) -> go.Figure:
+    """มุมมองแบบ 11 สมการ: y₆ Benchmark (เส้นประ ไม่รวม) · y₅ deep call LEAPS · y₃ Net = Σ Active (หนา)
+
+    ไม่มีโซนกำไร/ขาดทุน เพราะเป็น model ไม่ใช่ P/L ของบัญชี
+    """
+    tok = theme_tokens(theme)
+    fig = go.Figure()
+    x = df[x_col].to_numpy(dtype=float)
+    pct_axis = x_col == PCT_COL
+    keys = [k for k in active if k in ELEVEN_ACTIVE]
+    styles = {"y6": dict(color=tok["text_secondary"], width=LINE["reference"], dash=REFERENCE_DASH),
+              "y5": dict(color=tok["series"][2], width=LINE["excess"]),
+              "y3": dict(color=tok["text_primary"], width=LINE["total"] + 2.0)}
+    drawn = (["y6"] if show_benchmark else []) + keys + ["y3"]
+    # วาด y₃ (หนา) ก่อนเส้นที่ Active เพื่อให้ y₅ บางทับอยู่ด้านบนและยังมองเห็นเมื่อค่าเท่ากัน
+    # (Active มีแค่ y₅ → y₃ = y₅) · legend เรียง y₆ → y₅ → y₃ ด้วย legendrank
+    order = (["y6"] if show_benchmark else []) + ["y3"] + keys
+    rank = {key: i for i, key in enumerate(drawn)}
+    for key in order:
+        fig.add_trace(go.Scatter(x=x, y=df[key], name=ELEVEN_NAMES[key], mode="lines", line=styles[key],
+                                 legendrank=1000 + rank[key],
+                                 hovertemplate=f"<b>%{{y:,.2f}}</b> USD  {ELEVEN_NAMES[key]}<extra></extra>"))
+    lo, hi = float(x.min()), float(x.max())
+    if x_start is not None:
+        lo = min(lo, float(x_start))
+    series = [df[k].to_numpy(dtype=float) for k in drawn]
+    full_y = _y_range(x, series, lo, hi)
+    if x01 is not None and lo <= x01 <= hi:
+        _vline(fig, x01, tok, f"x₀₁ = P₀ {x01:,.2f} · สลับ δ", dash="dash")
+    if spot is not None:
+        _vline(fig, spot, tok, "ตอนนี้" if pct_axis else f"ตอนนี้ {spot:,.2f}", dash="solid", strong=True)
+    hover_title = ("ทุกตัวที่ <b>%{x:.0f}%</b> ของราคาตอนนี้" if pct_axis else "ราคา <b>%{x:,.2f}</b> USD")
+    fig.update_layout(**_layout(tok, height=height, x_title=x_title, y_title="USD (model 11 สมการ)",
+                                title=title, subtitle=subtitle, hover_title=hover_title,
+                                x_range=[lo, hi], y_range=full_y))
+    fig.update_layout(updatemenus=_zoom_menu(tok, x, series, 100.0 if pct_axis else spot, pct_axis,
+                                             ([lo, hi], full_y)))
+    _end_labels(fig, tok, hi, [(ELEVEN_SHORT[k], float(df[k].iloc[-1])) for k in drawn],
+                _finite_span(df, drawn))
     return fig

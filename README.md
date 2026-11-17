@@ -182,6 +182,20 @@ WEBULL_TOKEN_TXT = """
   (อ่าน `webull_lego_state` 1 node + แถวล่าสุด 1 แถวต่อ chain) ไม่ขึ้นกับตัวเลือก PROD/PAPER ใน sidebar
 - ข้อมูลเก็บไว้ 5 นาที (ปุ่มรีเฟรชกดซ้ำได้ทุก 30 วินาที) เพื่อไม่แย่ง rate limit กับ bot
 
+### มุมมอง 🧩 แบบ 11 สมการ
+
+กรอบเดียวกับแอป React 11 สมการ ใช้ค่าจริงของแต่ละตัว (หน่วยเป็น model ไม่ใช่ P/L ของบัญชี):
+
+| เส้น | สมการ | รวมใน y₃ |
+| --- | --- | --- |
+| y₆ Benchmark (R) | สมการที่ 6: y₆ = 0 + FIX_C × ln(x₁/x₀₁) × δ₂ | ❌ |
+| y₅ deep call LEAPS | สมการที่ 5: y₅ = 0 + FIX_C × ln(x₁/x₀₁) × δ(x₁), δ(x₁) = { x₁ ≥ x₀₁ → δ₂ ; else → δ₁ } | ✅ |
+| y₃ Net | สมการที่ 3: y₃ = Σ(เส้นที่ Active) | — |
+
+x₀₁ = P₀ ของ chain (R = 0 ตรงกับ Rₙ ของ LEGO) · δ₂ = 1.0 · bias = 0 ·
+δ₁ = (มูลค่า option ตอนนี้ + หุ้นจริง × ราคา) ÷ FIX_C (โหมด Dynamic ของแอป React ด้วยค่าจาก Webull) ·
+ไม่มี chain / P₀ หรือ Webull กับ bot ไม่ตรงกัน → ไม่วาดและบอกเหตุผล
+
 ### รูปแบบ positions ที่อ่านได้
 
 `GET /trading/assets/positions/list` (v3) ส่งขาของ option ใน `legs` และไม่มี `side`

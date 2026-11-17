@@ -425,6 +425,77 @@ def test_portfolio_lego_sums_usable_chains_only():
     assert payoff.portfolio_lego([], np.array([100.0])) is None
 
 
+# ---------------------------------------------------------------- แบบ 11 สมการ (แอป React)
+
+def _eleven_book(state=STATE, positions=POSITIONS):
+    chains, issues = payoff.lego_chains(state, ROWS)
+    books, _ = payoff.build_books({"positions": positions, "options": OPTION_QUOTES}, chains, issues, NOW)
+    return books[0]
+
+
+def test_eleven_params_use_p0_and_the_dynamic_delta1():
+    params, issue = payoff.eleven_params(_eleven_book())
+    assert issue is None
+    assert (params.x01, params.delta2, params.fix_c) == (10.0, 1.0, pytest.approx(1500.0))
+    assert (params.option_value, params.stock_value) == (330.0, 540.0)       # 1 × 100 × 3.30 · 60 × 9
+    assert params.delta1 == pytest.approx((330 + 540) / 1500)                  # 0.58
+
+
+def test_eleven_lines_follow_equations_5_and_6():
+    params, _ = payoff.eleven_params(_eleven_book())
+    grid = np.array([5.0, 9.0, 10.0, 12.0, 20.0])
+    df = payoff.eleven_curves(params, grid)
+    y6 = 1500 * np.log(grid / 10.0)
+    assert np.allclose(df["y6"], y6 * 1.0)                                     # y₆ = FIX_C·ln(x/x₀₁)·δ₂
+    below = grid < 10.0
+    assert np.allclose(df["y5"][below], y6[below] * params.delta1)             # ต่ำกว่า x₀₁ → δ₁
+    assert np.allclose(df["y5"][~below], y6[~below] * 1.0)                     # x₀₁ ขึ้นไป → δ₂
+    assert df.loc[df["price"] == 10.0, "y5"].iloc[0] == 0.0                    # ต่อเนื่องที่ x₀₁ (bias 0)
+
+
+def test_eleven_net_is_the_sum_of_active_lines_without_the_benchmark():
+    params, _ = payoff.eleven_params(_eleven_book())
+    grid = np.array([6.0, 10.0, 14.0])
+    on = payoff.eleven_curves(params, grid, active=["y5"])
+    assert np.allclose(on["y3"], on["y5"])                                     # y₃ = Σ Active = y₅
+    off = payoff.eleven_curves(params, grid, active=[])
+    assert np.allclose(off["y3"], 0.0)                                         # ไม่มี Active → 0
+    bench = payoff.eleven_curves(params, grid, active=["y5", "y6"])
+    assert np.allclose(bench["y3"], bench["y5"])                               # y₆ ไม่ถูกรวมเสมอ
+
+
+def test_eleven_fails_closed_without_the_bot_chain_or_p0():
+    no_chain = _eleven_book(state={})
+    assert payoff.eleven_params(no_chain)[0] is None
+    no_p0 = {"AAA_fake01": {**STATE["AAA_fake01"], "p0": None}}
+    params, issue = payoff.eleven_params(_eleven_book(state=no_p0))
+    assert params is None and "P₀" in issue
+
+
+def test_eleven_portfolio_sums_each_symbol_with_its_own_parameters():
+    book = _eleven_book()
+    df, skipped = payoff.eleven_portfolio([book], np.array([50.0, 100.0, 150.0]))
+    params, _ = payoff.eleven_params(book)
+    single = payoff.eleven_curves(params, book.spot * np.array([0.5, 1.0, 1.5]))
+    assert not skipped and np.allclose(df["y5"], single["y5"]) and np.allclose(df["y3"], single["y3"])
+    none, why = payoff.eleven_portfolio([_eleven_book(state={})], np.array([100.0]))
+    assert none is None and why
+
+
+def test_eleven_figure_draws_benchmark_lines_and_net_without_zones():
+    params, _ = payoff.eleven_params(_eleven_book())
+    df = payoff.eleven_curves(params, payoff.price_grid(9.0, 0, 200, extra=[10.0]))
+    fig = payoff.eleven_figure(df, x01=10.0, spot=9.0, x_start=0.0, theme="dark")
+    by_rank = sorted(fig.data, key=lambda trace: trace.legendrank)
+    assert [t.name for t in by_rank] == [payoff.ELEVEN_NAMES[k] for k in ("y6", "y5", "y3")]   # legend
+    assert [t.name for t in fig.data][-2:] == [payoff.ELEVEN_NAMES["y3"], payoff.ELEVEN_NAMES["y5"]]  # y₅ ทับ y₃
+    assert fig.data[0].line.dash == payoff.REFERENCE_DASH                      # Benchmark เป็นเส้นประ
+    assert not [shape for shape in fig.layout.shapes if shape.type == "rect"]  # model: ไม่มีโซนกำไร/ขาดทุน
+    assert any("x₀₁ = P₀ 10.00" in (a.text or "") for a in fig.layout.annotations)
+    hidden = payoff.eleven_figure(df, active=[], show_benchmark=False)
+    assert [t.name for t in hidden.data] == [payoff.ELEVEN_NAMES["y3"]]
+
+
 # ---------------------------------------------------------------- กราฟ
 
 def test_payoff_figure_draws_only_finite_selected_lines():
@@ -891,6 +962,20 @@ def test_the_reload_guard_knows_the_v3_parser():
     import streamlit_app
     assert {"parse_occ", "underlying_symbols", "SKIP_PREFIX"} <= set(streamlit_app._REQUIRED_PAYOFF_API)
     assert webull_read.SNAPSHOT_SCHEMA >= 2
+
+
+def test_the_eleven_equation_view(monkeypatch):
+    import streamlit_app
+    app = payoff_app(monkeypatch)
+    app.run(timeout=30)
+    app.button_group(key="payoff_view").set_value(streamlit_app.PAYOFF_VIEW_ELEVEN).run(timeout=30)
+    assert not app.exception and not app.error
+    metrics = {m.label: m.value for m in app.metric}
+    assert metrics["x₀₁ = P₀"] == "10.00" and metrics["δ₁ (ขาลง)"] == "0.580" and metrics["δ₂ (ขาขึ้น)"] == "1.00"
+    expected = 1500 * math.log(9.0 / 10.0) * 0.58
+    assert metrics["y₃ ที่ราคาตอนนี้"] == f"{expected:+,.2f}"
+    assert len(app.get("plotly_chart")) == 2                                    # 101 + แบบ 11 สมการ
+    assert any(c.value.startswith("สมการที่ 3 (Net): y₃ = Σ(เส้นที่ Active)") for c in app.caption)
 
 
 def test_a_webull_error_stays_inside_the_tab(monkeypatch):

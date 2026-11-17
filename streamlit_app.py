@@ -33,6 +33,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import firebase_admin
+import numpy as np
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
@@ -99,7 +100,9 @@ import lego_webull_read as _lego_webull_read
 _REQUIRED_PAYOFF_API = ("build_books", "book_curves", "lego_chains", "lego_view_curves",
                         "portfolio_curves", "portfolio_lego", "payoff_figure", "lego_ledger_figure",
                         # อ่าน legs ของ Webull OpenAPI v3 (รุ่นเก่าอ่านแค่ items → option หาย)
-                        "parse_occ", "underlying_symbols", "SKIP_PREFIX", "chart_config", "MENU_COLORS")
+                        "parse_occ", "underlying_symbols", "SKIP_PREFIX", "chart_config", "MENU_COLORS",
+                        # มุมมองแบบ 11 สมการ (y₃ = Σ Active · y₅ deep call LEAPS · y₆ Benchmark)
+                        "eleven_params", "eleven_curves", "eleven_portfolio", "eleven_figure")
 if any(not hasattr(payoff, name) for name in _REQUIRED_PAYOFF_API):
     payoff = importlib.reload(payoff)
 if getattr(_lego_webull_read, "SNAPSHOT_SCHEMA", 0) < 2:
@@ -724,6 +727,8 @@ WEBULL_SECRETS = ("WEBULL_APP_KEY", "WEBULL_APP_SECRET", "WEBULL_REGION_ID", "WE
 PAYOFF_TTL_S, PAYOFF_COOLDOWN_S = 300, 30      # ไม่แย่ง rate limit / token กับ bot PROD
 PAYOFF_ALL = "รวมพอร์ต"
 PAYOFF_VIEW_REAL, PAYOFF_VIEW_LEGO = "💵 บัญชีจริง (Webull)", "🧬 LEGO model ledger"
+PAYOFF_VIEW_ELEVEN = "🧩 แบบ 11 สมการ"
+PAYOFF_VIEWS = (PAYOFF_VIEW_REAL, PAYOFF_VIEW_LEGO, PAYOFF_VIEW_ELEVEN)
 PAYOFF_RANGE_DEFAULT = (0, 200)             # 0 ถึง 2 × S₀
 PAYOFF_CHART_HINT = ("ชี้เมาส์ = ค่าทุกเส้นที่ราคานั้น · ปุ่ม ±10/25/50% มุมขวาบน = ซูมรอบราคาตอนนี้ · "
                      "ลากแถบใต้กราฟ = เลื่อนดูช่วงราคา · คลิกชื่อเส้น = ซ่อน/โชว์ (ดับเบิลคลิก = ดูเส้นเดียว) · "
@@ -942,6 +947,72 @@ def _payoff_lego(books: list, combined: bool, now) -> None:
                "แต่ R(S) ยังวิ่ง ช่องห่างจึงหด = แพ้ถือเฉยๆ")
 
 
+def _payoff_eleven(books: list, combined: bool, now) -> list[str]:
+    """มุมมองแบบแอป React 11 สมการ — y₃ = Σ Active · y₅ deep call LEAPS · y₆ = R (Benchmark ไม่ถูกรวม)"""
+    stamp = _payoff_stamp(now)
+    names = [payoff.ELEVEN_NAMES[k] for k in payoff.ELEVEN_ACTIVE]
+    current = st.session_state.get("payoff_eleven_active")
+    if not isinstance(current, list) or not set(current) <= set(names):
+        st.session_state["payoff_eleven_active"] = names
+    picked = st.pills("เส้นที่ Active (รวมเป็น y₃)", names, selection_mode="multi",
+                      key="payoff_eleven_active") or []
+    active = [k for k in payoff.ELEVEN_ACTIVE if payoff.ELEVEN_NAMES[k] in picked]
+    show_bench = st.toggle("แสดง y₆ Benchmark (R) — ไม่ถูกรวมใน y₃", value=True, key="payoff_eleven_bench")
+    lo, hi = _payoff_range()
+    theme = _streamlit_theme()
+    if combined:
+        df, skipped = payoff.eleven_portfolio(books, payoff.pct_grid(lo, hi), active)
+        if df is None:
+            st.info("ไม่มีตัวที่วาดแบบ 11 สมการได้ (ดูเหตุผลด้านล่าง)")
+            return skipped
+        at_now = float(np.interp(100.0, df[payoff.PCT_COL], df["y3"])) if len(df) else 0.0
+        cards = st.columns(3)
+        cards[0].metric("y₃ ตอนนี้ (รวม)", f"{at_now:+,.2f}")
+        cards[1].metric("จำนวนตัวที่รวม", len(books) - len(skipped))
+        cards[2].metric("δ₂", f"{payoff.DELTA2:.2f}")
+        fig = payoff.eleven_figure(df, active=active, show_benchmark=show_bench, spot=100.0,
+                                   x_col=payoff.PCT_COL, x_start=float(lo), theme=theme,
+                                   x_title="% ของราคาปัจจุบัน (สมมติทุกตัวขยับ % เท่ากัน)",
+                                   title="รวมพอร์ต · แบบ 11 สมการ",
+                                   subtitle=f"y₃ = Σ Active · {len(books) - len(skipped)} ตัว · {stamp}")
+        x_col, at, filename = payoff.PCT_COL, payoff.TABLE_PCTS, "eleven_portfolio"
+    else:
+        book = books[0]
+        params, issue = payoff.eleven_params(book)
+        if params is None:
+            st.info(issue)
+            return []
+        grid = payoff.price_grid(book.spot, lo, hi, extra=[params.x01])
+        df = payoff.eleven_curves(params, grid, active)
+        now_y3 = float(payoff.eleven_curves(params, [book.spot], active)["y3"].iloc[0])
+        cards = st.columns(5)
+        cards[0].metric("x₀₁ = P₀", f"{params.x01:,.2f}")
+        cards[1].metric("δ₁ (ขาลง)", f"{params.delta1:.3f}",
+                        help=f"Dynamic: (มูลค่า option {params.option_value:,.2f} + หุ้นจริง × ราคา "
+                             f"{params.stock_value:,.2f}) ÷ FIX_C {params.fix_c:,.0f}")
+        cards[2].metric("δ₂ (ขาขึ้น)", f"{params.delta2:.2f}")
+        cards[3].metric("FIX_C", f"{params.fix_c:,.0f}")
+        cards[4].metric("y₃ ที่ราคาตอนนี้", f"{now_y3:+,.2f}")
+        fig = payoff.eleven_figure(df, active=active, show_benchmark=show_bench, x01=params.x01,
+                                   spot=book.spot, x_start=book.spot * lo / 100, theme=theme,
+                                   title=f"{book.symbol} · แบบ 11 สมการ",
+                                   subtitle=f"x₀₁ = P₀ {params.x01:,.2f} · δ₁ {params.delta1:.3f} · "
+                                            f"δ₂ {params.delta2:.2f} · FIX_C {params.fix_c:,.0f} · {stamp}")
+        x_col, at = payoff.PRICE_COL, [book.spot * pct / 100 for pct in payoff.TABLE_PCTS]
+        filename, skipped = f"eleven_{book.symbol}", []
+    st.plotly_chart(fig, theme=None, config=payoff.chart_config(filename), key="payoff_eleven_chart")
+    st.caption(PAYOFF_CHART_HINT)
+    with st.expander("ตารางค่า"):
+        st.dataframe(payoff.curve_table(df, x_col, {k: payoff.ELEVEN_NAMES[k] for k in ("y6", "y5", "y3")}, at),
+                     hide_index=True)
+    st.caption("สมการที่ 3 (Net): y₃ = Σ(เส้นที่ Active) · * Benchmark y₆ ไม่ถูกรวม · "
+               "สมการที่ 5 (deep call LEAPS): y₅ = 0 + FIX_C × ln(x₁/x₀₁) × δ(x₁), "
+               "δ(x₁) = { x₁ ≥ x₀₁ → δ₂ ; else → δ₁ } · สมการที่ 6 (Benchmark = R): y₆ = 0 + FIX_C × ln(x₁/x₀₁) × δ₂ · "
+               "x₀₁ = P₀ ของ chain · δ₁ = (มูลค่า option + หุ้นจริง × ราคา) ÷ FIX_C จาก Webull ล่าสุด · bias = 0 · "
+               "หน่วยเป็น model ไม่ใช่ P/L ของบัญชี")
+    return [s for s in skipped if s]
+
+
 def _render_payoff(snap: dict, chains: dict, chain_issues: dict, now) -> None:
     head, action = st.columns([6, 1], vertical_alignment="center")
     with head:
@@ -961,14 +1032,15 @@ def _render_payoff(snap: dict, chains: dict, chain_issues: dict, now) -> None:
         return
     choices = [book.symbol for book in books] + ([PAYOFF_ALL] if len(books) > 1 else [])
     _payoff_choice("payoff_symbol", choices, choices[0])
-    _payoff_choice("payoff_view", [PAYOFF_VIEW_REAL, PAYOFF_VIEW_LEGO], PAYOFF_VIEW_REAL)
+    _payoff_choice("payoff_view", list(PAYOFF_VIEWS), PAYOFF_VIEW_REAL)
     pick = st.segmented_control("ตัว", choices, key="payoff_symbol") or choices[0]
-    view = st.segmented_control("มุมมอง", [PAYOFF_VIEW_REAL, PAYOFF_VIEW_LEGO],
-                                key="payoff_view") or PAYOFF_VIEW_REAL
+    view = st.segmented_control("มุมมอง", list(PAYOFF_VIEWS), key="payoff_view") or PAYOFF_VIEW_REAL
     combined = pick == PAYOFF_ALL
     picked = books if combined else [book for book in books if book.symbol == pick]
     if view == PAYOFF_VIEW_REAL:
         notes += _payoff_real(picked, combined, now)
+    elif view == PAYOFF_VIEW_ELEVEN:
+        notes += _payoff_eleven(picked, combined, now)
     else:
         _payoff_lego(picked, combined, now)
     notes += [n for book in picked for n in (*book.notes, book.chain_issue)]
