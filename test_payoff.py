@@ -482,13 +482,42 @@ def test_eleven_portfolio_sums_each_symbol_with_its_own_parameters():
     assert none is None and why
 
 
+def test_y8_is_the_real_leaps_call_intrinsic_minus_the_premium_paid():
+    params, _ = payoff.eleven_params(_eleven_book())
+    assert params.calls == ((7.0, 100.0, pytest.approx(490.0)),)               # K 7 · 1 สัญญา · ทุน 4.90
+    assert params.break_evens() == [pytest.approx(11.9)]                        # BE₈ = K + premium/หุ้น
+    df = payoff.eleven_curves(params, np.array([5.0, 7.0, 9.0, 11.9, 12.0]))
+    assert np.allclose(df["y8"], [-490.0, -490.0, -290.0, 0.0, 10.0])
+    assert np.allclose(df["y3"], df["y5"] + df["y8"])                           # y₃ = y₅ + y₈ (y₆ ไม่ถูกรวม)
+    only5 = payoff.eleven_curves(params, np.array([9.0]), active=["y5"])
+    assert only5["y3"].iloc[0] == pytest.approx(only5["y5"].iloc[0])
+
+
+def test_y8_fails_closed_without_the_option_cost():
+    no_cost = dict(CALL, cost_price=None, items=[{k: v for k, v in CALL["items"][0].items() if k != "cost_price"}])
+    params, issue = payoff.eleven_params(_eleven_book(positions=[STOCK, no_cost]))
+    assert params is None and "ทุนของ option" in issue
+
+
+def test_eleven_figure_marks_the_strike_and_the_break_even():
+    params, _ = payoff.eleven_params(_eleven_book())
+    df = payoff.eleven_curves(params, payoff.price_grid(9.0, 0, 200, extra=[10.0, 7.0]))
+    fig = payoff.eleven_figure(df, x01=10.0, spot=9.0, strikes=[7.0], break_evens=params.break_evens())
+    texts = [a.text or "" for a in fig.layout.annotations]
+    assert "K 7" in texts and any(t.startswith("BE₈ <b>11.90") for t in texts)
+    assert any(t.name == "BE₈" and list(t.x) == [pytest.approx(11.9)] for t in fig.data)
+    without = payoff.eleven_figure(df, active=["y5"], strikes=[7.0], break_evens=[11.9])
+    assert not any(t.name == "BE₈" for t in without.data) and "K 7" not in [a.text for a in without.layout.annotations]
+
+
 def test_eleven_figure_draws_benchmark_lines_and_net_without_zones():
     params, _ = payoff.eleven_params(_eleven_book())
     df = payoff.eleven_curves(params, payoff.price_grid(9.0, 0, 200, extra=[10.0]))
     fig = payoff.eleven_figure(df, x01=10.0, spot=9.0, x_start=0.0, theme="dark")
-    by_rank = sorted(fig.data, key=lambda trace: trace.legendrank)
-    assert [t.name for t in by_rank] == [payoff.ELEVEN_NAMES[k] for k in ("y6", "y5", "y3")]   # legend
-    assert [t.name for t in fig.data][-2:] == [payoff.ELEVEN_NAMES["y3"], payoff.ELEVEN_NAMES["y5"]]  # y₅ ทับ y₃
+    lines = [t for t in fig.data if t.mode == "lines"]
+    by_rank = sorted(lines, key=lambda trace: trace.legendrank)
+    assert [t.name for t in by_rank] == [payoff.ELEVEN_NAMES[k] for k in ("y6", "y5", "y8", "y3")]   # legend
+    assert [t.name for t in lines] == [payoff.ELEVEN_NAMES[k] for k in ("y6", "y3", "y5", "y8")]     # ทับ y₃
     assert fig.data[0].line.dash == payoff.REFERENCE_DASH                      # Benchmark เป็นเส้นประ
     assert not [shape for shape in fig.layout.shapes if shape.type == "rect"]  # model: ไม่มีโซนกำไร/ขาดทุน
     assert any("x₀₁ = P₀ 10.00" in (a.text or "") for a in fig.layout.annotations)
@@ -972,8 +1001,9 @@ def test_the_eleven_equation_view(monkeypatch):
     assert not app.exception and not app.error
     metrics = {m.label: m.value for m in app.metric}
     assert metrics["x₀₁ = P₀"] == "10.00" and metrics["δ₁ (ขาลง)"] == "0.580" and metrics["δ₂ (ขาขึ้น)"] == "1.00"
-    expected = 1500 * math.log(9.0 / 10.0) * 0.58
-    assert metrics["y₃ ที่ราคาตอนนี้"] == f"{expected:+,.2f}"
+    expected = 1500 * math.log(9.0 / 10.0) * 0.58 + (max(0.0, 9.0 - 7.0) * 100 - 490)     # y₅ + y₈
+    assert metrics["y₃ ที่ราคาตอนนี้"] == f"{expected:+,.2f}" == "-381.66"
+    assert metrics["Option"] == "1×C7"
     assert len(app.get("plotly_chart")) == 2                                    # 101 + แบบ 11 สมการ
     assert any(c.value.startswith("สมการที่ 3 (Net): y₃ = Σ(เส้นที่ Active)") for c in app.caption)
 

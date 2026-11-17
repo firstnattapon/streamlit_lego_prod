@@ -190,6 +190,7 @@ WEBULL_TOKEN_TXT = """
 | --- | --- | --- |
 | y₆ Benchmark (R) | สมการที่ 6: y₆ = 0 + FIX_C × ln(x₁/x₀₁) × δ₂ | ❌ |
 | y₅ deep call LEAPS | สมการที่ 5: y₅ = 0 + FIX_C × ln(x₁/x₀₁) × δ(x₁), δ(x₁) = { x₁ ≥ x₀₁ → δ₂ ; else → δ₁ } | ✅ |
+| y₈ Call Intrinsic (LEAPS จริง) | สมการที่ 8: y₈ = max(0, x₁ − K) × 100 × n − premium ที่จ่ายจริง (cost_price) · มีเส้น K และจุดคุ้มทุน BE₈ = K + premium ต่อหุ้น | ✅ |
 | y₃ Net | สมการที่ 3: y₃ = Σ(เส้นที่ Active) | — |
 
 x₀₁ = P₀ ของ chain (R = 0 ตรงกับ Rₙ ของ LEGO) · δ₂ = 1.0 · bias = 0 ·

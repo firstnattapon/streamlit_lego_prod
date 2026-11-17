@@ -102,7 +102,8 @@ _REQUIRED_PAYOFF_API = ("build_books", "book_curves", "lego_chains", "lego_view_
                         # อ่าน legs ของ Webull OpenAPI v3 (รุ่นเก่าอ่านแค่ items → option หาย)
                         "parse_occ", "underlying_symbols", "SKIP_PREFIX", "chart_config", "MENU_COLORS",
                         # มุมมองแบบ 11 สมการ (y₃ = Σ Active · y₅ deep call LEAPS · y₆ Benchmark)
-                        "eleven_params", "eleven_curves", "eleven_portfolio", "eleven_figure")
+                        "eleven_params", "eleven_curves", "eleven_portfolio", "eleven_figure",
+                        "ELEVEN_SCHEMA")      # 2 = มี y₈ Call Intrinsic ของ LEAPS จริง
 if any(not hasattr(payoff, name) for name in _REQUIRED_PAYOFF_API):
     payoff = importlib.reload(payoff)
 if getattr(_lego_webull_read, "SNAPSHOT_SCHEMA", 0) < 2:
@@ -985,29 +986,42 @@ def _payoff_eleven(books: list, combined: bool, now) -> list[str]:
         grid = payoff.price_grid(book.spot, lo, hi, extra=[params.x01])
         df = payoff.eleven_curves(params, grid, active)
         now_y3 = float(payoff.eleven_curves(params, [book.spot], active)["y3"].iloc[0])
-        cards = st.columns(5)
+        bes = params.break_evens()
+        option_text = " + ".join(f"{contracts / 100:g}×C{strike:g}" for strike, contracts, _ in params.calls) or "—"
+        option_help = " · ".join(
+            f"K {strike:g} · ทุนที่จ่าย {premium:,.2f} USD · BE₈ {be:,.2f}"
+            for (strike, contracts, premium), be in zip(params.calls, bes)) or None
+        cards = st.columns(6)
         cards[0].metric("x₀₁ = P₀", f"{params.x01:,.2f}")
         cards[1].metric("δ₁ (ขาลง)", f"{params.delta1:.3f}",
                         help=f"Dynamic: (มูลค่า option {params.option_value:,.2f} + หุ้นจริง × ราคา "
                              f"{params.stock_value:,.2f}) ÷ FIX_C {params.fix_c:,.0f}")
         cards[2].metric("δ₂ (ขาขึ้น)", f"{params.delta2:.2f}")
-        cards[3].metric("FIX_C", f"{params.fix_c:,.0f}")
-        cards[4].metric("y₃ ที่ราคาตอนนี้", f"{now_y3:+,.2f}")
+        cards[3].metric("Option", option_text, help=option_help)
+        cards[4].metric("FIX_C", f"{params.fix_c:,.0f}")
+        cards[5].metric("y₃ ที่ราคาตอนนี้", f"{now_y3:+,.2f}")
+        if params.note:
+            skipped_notes = [params.note]
+        else:
+            skipped_notes = []
         fig = payoff.eleven_figure(df, active=active, show_benchmark=show_bench, x01=params.x01,
+                                   strikes=[strike for strike, _, _ in params.calls], break_evens=bes,
                                    spot=book.spot, x_start=book.spot * lo / 100, theme=theme,
                                    title=f"{book.symbol} · แบบ 11 สมการ",
                                    subtitle=f"x₀₁ = P₀ {params.x01:,.2f} · δ₁ {params.delta1:.3f} · "
                                             f"δ₂ {params.delta2:.2f} · FIX_C {params.fix_c:,.0f} · {stamp}")
         x_col, at = payoff.PRICE_COL, [book.spot * pct / 100 for pct in payoff.TABLE_PCTS]
-        filename, skipped = f"eleven_{book.symbol}", []
+        filename, skipped = f"eleven_{book.symbol}", skipped_notes
     st.plotly_chart(fig, theme=None, config=payoff.chart_config(filename), key="payoff_eleven_chart")
     st.caption(PAYOFF_CHART_HINT)
     with st.expander("ตารางค่า"):
-        st.dataframe(payoff.curve_table(df, x_col, {k: payoff.ELEVEN_NAMES[k] for k in ("y6", "y5", "y3")}, at),
+        st.dataframe(payoff.curve_table(df, x_col, {k: payoff.ELEVEN_NAMES[k] for k in ("y6", "y5", "y8", "y3")},
+                                        at),
                      hide_index=True)
     st.caption("สมการที่ 3 (Net): y₃ = Σ(เส้นที่ Active) · * Benchmark y₆ ไม่ถูกรวม · "
                "สมการที่ 5 (deep call LEAPS): y₅ = 0 + FIX_C × ln(x₁/x₀₁) × δ(x₁), "
                "δ(x₁) = { x₁ ≥ x₀₁ → δ₂ ; else → δ₁ } · สมการที่ 6 (Benchmark = R): y₆ = 0 + FIX_C × ln(x₁/x₀₁) × δ₂ · "
+               "สมการที่ 8 (Call Intrinsic ของ LEAPS จริง): y₈ = max(0, x₁ − K) × 100 × n − premium ที่จ่าย · "
                "x₀₁ = P₀ ของ chain · δ₁ = (มูลค่า option + หุ้นจริง × ราคา) ÷ FIX_C จาก Webull ล่าสุด · bias = 0 · "
                "หน่วยเป็น model ไม่ใช่ P/L ของบัญชี")
     return [s for s in skipped if s]
