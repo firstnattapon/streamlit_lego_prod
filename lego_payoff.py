@@ -644,9 +644,12 @@ def portfolio_lego(books: Sequence[SymbolBook], pcts: np.ndarray) -> pd.DataFram
 #   y₃ = Σ(เส้นที่ Active)            (y₆ ไม่ถูกรวม)
 # x₀₁ = P₀ ของ chain (R = 0 ตรงกับ Rₙ ของ LEGO) · δ₂ = 1.0 · bias = 0
 # δ₁ = (มูลค่า option ตอนนี้ + หุ้นจริง × ราคา) ÷ FIX_C  — โหมด Dynamic ของแอป React ด้วยค่าจาก Webull
-ELEVEN_NAMES = {"y6": "y₆ Benchmark (R)", "y5": "y₅ deep call LEAPS", "y3": "y₃ Net = Σ Active"}
-ELEVEN_SHORT = {"y6": "y₆", "y5": "y₅", "y3": "y₃"}
-ELEVEN_ACTIVE = ("y5",)          # เส้นที่รวมเป็น y₃ ได้ (y₆ เป็น Benchmark ไม่ถูกรวม)
+#   y₈ = Σ max(0, S − K)·m·n − premium ที่จ่ายจริง   (สมการที่ 8 Call Intrinsic ของ LEAPS จริง · รวมใน y₃)
+ELEVEN_NAMES = {"y6": "y₆ Benchmark (R)", "y5": "y₅ deep call LEAPS", "y8": "y₈ Call Intrinsic (LEAPS จริง)",
+                "y3": "y₃ Net = Σ Active"}
+ELEVEN_SHORT = {"y6": "y₆", "y5": "y₅", "y8": "y₈", "y3": "y₃"}
+ELEVEN_ACTIVE = ("y5", "y8")     # เส้นที่รวมเป็น y₃ ได้ (y₆ เป็น Benchmark ไม่ถูกรวม)
+ELEVEN_SCHEMA = 2                # 2 = มี y₈ (reload guard ตอน hot deploy ใช้แยกโมดูลรุ่นเก่า)
 DELTA2 = 1.0
 
 
@@ -659,6 +662,12 @@ class ElevenParams:
     delta2: float
     option_value: float          # Σ option ยาว m·n·mark ตอนนี้
     stock_value: float           # หุ้นจริง × S₀
+    calls: tuple = ()            # ((strike, contracts = m·n, premium ที่จ่าย = cost·m·n), …) ของ long call
+    note: str | None = None      # เช่น มี put ที่ยังไม่แสดง
+
+    def break_evens(self) -> list[float]:
+        """BE₈ ของแต่ละ call = K + premium ต่อหุ้น"""
+        return [strike + premium / contracts for strike, contracts, premium in self.calls if contracts]
 
 
 def eleven_params(book: SymbolBook) -> tuple[ElevenParams | None, str | None]:
@@ -673,18 +682,29 @@ def eleven_params(book: SymbolBook) -> tuple[ElevenParams | None, str | None]:
     longs = [leg for leg in book.options if leg.qty > 0]
     if any(leg.mark is None for leg in longs):
         return None, f"{book.symbol}: ไม่มีราคา option สำหรับคิด δ₁"
+    calls = [leg for leg in longs if leg.kind == "call"]
+    if any(leg.cost is None for leg in calls):
+        return None, f"{book.symbol}: ไม่มีทุนของ option (cost_price) สำหรับ y₈ — วาดแบบ 11 สมการไม่ได้"
     option_value = float(sum(leg.multiplier * leg.qty * leg.mark for leg in longs))
     stock_value = float(sum(leg.qty for leg in book.legs if leg.kind == "stock")) * book.spot
+    puts = [leg for leg in book.options if leg.kind == "put" or leg.qty < 0]
+    note = (f"{book.symbol}: มี option ที่ไม่ใช่ long call ({len(puts)} ขา) ยังไม่แสดงในแบบ 11 สมการ" if puts else None)
     return ElevenParams(book.symbol, chain.fix_c, chain.p0, (option_value + stock_value) / chain.fix_c,
-                        DELTA2, option_value, stock_value), None
+                        DELTA2, option_value, stock_value,
+                        calls=tuple((leg.strike, leg.multiplier * leg.qty, leg.cost * leg.multiplier * leg.qty)
+                                    for leg in calls),
+                        note=note), None
 
 
 def eleven_curves(params: ElevenParams, grid: np.ndarray, active: Iterable[str] = ELEVEN_ACTIVE) -> pd.DataFrame:
-    """price, y6, y5, y3 (= Σ Active · y₆ ไม่ถูกรวม)"""
+    """price, y6, y5, y8, y3 (= Σ Active · y₆ ไม่ถูกรวม)"""
     S = np.asarray(grid, dtype=float)
     base = params.fix_c * np.log(S / params.x01)
+    y8 = np.zeros_like(S)
+    for strike, contracts, premium in params.calls:
+        y8 = y8 + np.maximum(0.0, S - strike) * contracts - premium
     out = pd.DataFrame({PRICE_COL: S, "y6": base * params.delta2,
-                        "y5": base * np.where(S >= params.x01, params.delta2, params.delta1)})
+                        "y5": base * np.where(S >= params.x01, params.delta2, params.delta1), "y8": y8})
     out["y3"] = eleven_net(out, active)
     return out
 
@@ -702,7 +722,7 @@ def eleven_portfolio(books: Sequence[SymbolBook], pcts: np.ndarray,
                      active: Iterable[str] = ELEVEN_ACTIVE) -> tuple[pd.DataFrame | None, list[str]]:
     """รวมทุกตัวที่ใช้ได้ ณ % ของ S₀ เดียวกัน (แต่ละตัวใช้ P₀ / δ₁ ของตัวเอง) · คืน (df, เหตุผลของตัวที่ข้าม)"""
     pcts = np.asarray(pcts, dtype=float)
-    out = pd.DataFrame({PCT_COL: pcts, "y6": 0.0, "y5": 0.0})
+    out = pd.DataFrame({PCT_COL: pcts, "y6": 0.0, "y5": 0.0, "y8": 0.0})
     skipped, used = [], 0
     for book in books:
         params, issue = eleven_params(book)
@@ -712,6 +732,7 @@ def eleven_portfolio(books: Sequence[SymbolBook], pcts: np.ndarray,
         curves = eleven_curves(params, book.spot * pcts / 100.0, active)
         out["y6"] += curves["y6"].to_numpy()
         out["y5"] += curves["y5"].to_numpy()
+        out["y8"] += curves["y8"].to_numpy()
         used += 1
     if not used:
         return None, skipped
@@ -1054,8 +1075,10 @@ def lego_ledger_figure(df: pd.DataFrame, *, x_col: str = PRICE_COL, x_title: str
 def eleven_figure(df: pd.DataFrame, *, active: Sequence[str] = ELEVEN_ACTIVE, show_benchmark: bool = True,
                   x01: float | None = None, spot: float | None = None, x_col: str = PRICE_COL,
                   x_title: str = "ราคาหุ้น (USD)", x_start: float | None = None, theme: str | None = None,
-                  title: str | None = None, subtitle: str | None = None, height: int = 560) -> go.Figure:
-    """มุมมองแบบ 11 สมการ: y₆ Benchmark (เส้นประ ไม่รวม) · y₅ deep call LEAPS · y₃ Net = Σ Active (หนา)
+                  title: str | None = None, subtitle: str | None = None,
+                  strikes: Sequence[float] = (), break_evens: Sequence[float] = (),
+                  height: int = 560) -> go.Figure:
+    """มุมมองแบบ 11 สมการ: y₆ Benchmark (เส้นประ ไม่รวม) · y₅ deep call LEAPS · y₈ Call Intrinsic · y₃ Net (หนา)
 
     ไม่มีโซนกำไร/ขาดทุน เพราะเป็น model ไม่ใช่ P/L ของบัญชี
     """
@@ -1066,6 +1089,7 @@ def eleven_figure(df: pd.DataFrame, *, active: Sequence[str] = ELEVEN_ACTIVE, sh
     keys = [k for k in active if k in ELEVEN_ACTIVE]
     styles = {"y6": dict(color=tok["text_secondary"], width=LINE["reference"], dash=REFERENCE_DASH),
               "y5": dict(color=tok["series"][2], width=LINE["excess"]),
+              "y8": dict(color=tok["series"][1], width=LINE["excess"]),
               "y3": dict(color=tok["text_primary"], width=LINE["total"] + 2.0)}
     drawn = (["y6"] if show_benchmark else []) + keys + ["y3"]
     # วาด y₃ (หนา) ก่อนเส้นที่ Active เพื่อให้ y₅ บางทับอยู่ด้านบนและยังมองเห็นเมื่อค่าเท่ากัน
@@ -1083,6 +1107,18 @@ def eleven_figure(df: pd.DataFrame, *, active: Sequence[str] = ELEVEN_ACTIVE, sh
     full_y = _y_range(x, series, lo, hi)
     if x01 is not None and lo <= x01 <= hi:
         _vline(fig, x01, tok, f"x₀₁ = P₀ {x01:,.2f} · สลับ δ", dash="dash")
+    if "y8" in keys:
+        for strike in strikes:
+            if lo <= strike <= hi:
+                _vline(fig, strike, tok, f"K {strike:g}", dash="dot")
+        points = [b for b in break_evens if lo <= b <= hi]
+        if points:                                   # BE₈ แบบ ReferenceDot ในแอป React
+            fig.add_trace(go.Scatter(
+                x=points, y=[0.0] * len(points), name="BE₈", mode="markers", showlegend=False,
+                marker=dict(size=10, color=tok["surface"], line=dict(color=tok["series"][1], width=2)),
+                hovertemplate="BE₈ ที่ <b>%{x:,.2f}</b><extra></extra>"))
+            for point in points:
+                _chip(fig, tok, point, 0.0, f"BE₈ <b>{point:,.2f}</b>", ax=40, ay=-34)
     if spot is not None:
         _vline(fig, spot, tok, "ตอนนี้" if pct_axis else f"ตอนนี้ {spot:,.2f}", dash="solid", strong=True)
     hover_title = ("ทุกตัวที่ <b>%{x:.0f}%</b> ของราคาตอนนี้" if pct_axis else "ราคา <b>%{x:,.2f}</b> USD")
