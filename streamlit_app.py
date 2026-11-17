@@ -724,7 +724,7 @@ WEBULL_SECRETS = ("WEBULL_APP_KEY", "WEBULL_APP_SECRET", "WEBULL_REGION_ID", "WE
 PAYOFF_TTL_S, PAYOFF_COOLDOWN_S = 300, 30      # ไม่แย่ง rate limit / token กับ bot PROD
 PAYOFF_ALL = "รวมพอร์ต"
 PAYOFF_VIEW_REAL, PAYOFF_VIEW_LEGO = "💵 บัญชีจริง (Webull)", "🧬 LEGO model ledger"
-PAYOFF_RANGE_DEFAULT = (40, 200)
+PAYOFF_RANGE_DEFAULT = (0, 200)             # 0 ถึง 2 × S₀
 PAYOFF_CHART_HINT = ("ชี้เมาส์ = ค่าทุกเส้นที่ราคานั้น · ปุ่ม ±10/25/50% มุมขวาบน = ซูมรอบราคาตอนนี้ · "
                      "ลากแถบใต้กราฟ = เลื่อนดูช่วงราคา · คลิกชื่อเส้น = ซ่อน/โชว์ (ดับเบิลคลิก = ดูเส้นเดียว) · "
                      "ดับเบิลคลิกกราฟ = กลับมุมมองเริ่มต้น · 📷 แถบเครื่องมือ = ดาวน์โหลด PNG")
@@ -802,7 +802,8 @@ def _payoff_range() -> tuple[int, int]:
     value = st.session_state.get("payoff_range")
     if not (isinstance(value, (list, tuple)) and len(value) == 2):
         st.session_state["payoff_range"] = PAYOFF_RANGE_DEFAULT
-    lo, hi = st.slider("ช่วงราคา (% ของราคาปัจจุบัน S₀)", 20, 300, step=5, key="payoff_range")
+    lo, hi = st.slider("ช่วงราคา (% ของราคาปัจจุบัน S₀)", 0, 300, step=5, key="payoff_range",
+                       help="ค่าเริ่มต้น 0 ถึง 2 × S₀ · ราคา 0 ทำให้เส้น ln เป็น −∞ ข้อมูลจึงเริ่มที่ 1% ของ S₀")
     return lo, hi
 
 
@@ -831,7 +832,7 @@ def _payoff_real(books: list, combined: bool, now) -> list[str]:
                                                       if b.usable_chain) or None))
         fig = payoff.payoff_figure(df, x_col=payoff.PCT_COL, show=show, spot=100.0, now_pl=now_pl,
                                    x_title="% ของราคาปัจจุบัน (สมมติทุกตัวขยับ % เท่ากัน)", theme=theme,
-                                   title="รวมพอร์ต · Payoff ณ ตอนนี้",
+                                   title="รวมพอร์ต · Payoff ณ ตอนนี้", x_start=float(lo),
                                    subtitle=f"{len(books)} ตัว · P/L ตอนนี้ {now_pl:+,.2f} USD · {stamp}")
         x_col, at, filename = payoff.PCT_COL, payoff.TABLE_PCTS, "payoff_portfolio"
     else:
@@ -858,6 +859,7 @@ def _payoff_real(books: list, combined: bool, now) -> list[str]:
                         help="(หุ้นจริง + Σ delta × 100 × สัญญา) × S₀ ÷ FIX_C — bot นับ LEAPS เป็นหุ้นเต็ม (delta 1)")
         fig = payoff.payoff_figure(df, show=show, spot=book.spot, now_pl=book.unrealized,
                                    strikes=strikes, u_star=chain.u_star if chain else None, theme=theme,
+                                   x_start=book.spot * lo / 100,
                                    title=f"{book.symbol} · Payoff ณ ตอนนี้",
                                    subtitle=f"S₀ {book.spot:,.2f} USD · P/L ตอนนี้ {book.unrealized:+,.2f} USD · "
                                             f"{leaps} · {stamp}")
@@ -902,7 +904,7 @@ def _payoff_lego(books: list, combined: bool, now) -> None:
         cards[2].metric("Σ Eₙ", f"{sum(c.excess for c in usable):+,.2f}")
         fig = payoff.lego_ledger_figure(df, x_col=payoff.PCT_COL, theme=theme,
                                         x_title="% ของราคาปัจจุบัน (สมมติทุกตัวขยับ % เท่ากัน)",
-                                        title="รวมพอร์ต · LEGO model ledger",
+                                        title="รวมพอร์ต · LEGO model ledger", x_start=float(lo),
                                         subtitle=f"{len(usable)} chain · Σ Eₙ "
                                                  f"{sum(c.excess for c in usable):+,.2f} USD · {stamp}")
         x_col, at, filename = payoff.PCT_COL, payoff.TABLE_PCTS, "lego_ledger_portfolio"
@@ -922,6 +924,7 @@ def _payoff_lego(books: list, combined: bool, now) -> None:
         cards[4].metric("Eₙ สะสม", f"{chain.excess:+,.2f}")
         fig = payoff.lego_ledger_figure(df, p_acted=chain.p_acted, u_star=chain.u_star, spot=book.spot,
                                         theme=theme, title=f"{book.symbol} · LEGO model ledger",
+                                        x_start=book.spot * lo / 100,
                                         subtitle=f"P_acted {chain.p_acted:,.2f} · Aₙ {chain.actual:+,.2f} · "
                                                  f"Eₙ {chain.excess:+,.2f} USD · {stamp}")
         x_col, at = payoff.PRICE_COL, [book.spot * pct / 100 for pct in payoff.TABLE_PCTS]

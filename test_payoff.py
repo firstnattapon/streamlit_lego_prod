@@ -318,6 +318,21 @@ def test_price_grid_contains_today_strikes_and_u_star():
     assert grid.min() == pytest.approx(3.6) and grid.max() == pytest.approx(18.0)
 
 
+def test_a_range_from_zero_starts_the_data_at_one_percent_and_the_axis_at_zero():
+    grid = payoff.price_grid(9.0, 0, 200, extra=[7.0, 15.0])
+    assert grid.min() == pytest.approx(0.09) and grid.max() == pytest.approx(18.0)       # 1% ถึง 2 × S₀
+    df = payoff.symbol_curves(legs(), 9.0, NOW, chain(), grid)
+    assert np.isfinite(df[list(payoff.LINE_KEYS)].to_numpy()).all()                       # ไม่มี ln(0) = −∞
+    fig = payoff.payoff_figure(df, spot=9.0, now_pl=-220.0, x_start=0.0)
+    assert fig.layout.xaxis.range[0] == 0.0 and fig.layout.xaxis.rangeslider.range[0] == 0.0
+    assert fig.layout.updatemenus[0].buttons[-1].args[0]["xaxis.range"] == [0.0, pytest.approx(18.0)]
+    assert {t.name for t in fig.data} >= {payoff.LINE_NAMES[k] for k in payoff.LINE_KEYS}   # ทุกเส้นยังวาด
+    pcts = payoff.pct_grid(0, 200)
+    assert pcts.min() == payoff.MIN_GRID_PCT and 100.0 in pcts and pcts.max() == 200.0
+    lego = payoff.lego_ledger_figure(payoff.lego_view_curves(chain(), grid), x_start=0.0)
+    assert lego.layout.xaxis.range[0] == 0.0
+
+
 # ---------------------------------------------------------------- state ของ bot (LEGO)
 
 def test_lego_chains_pick_the_latest_chain_and_read_v3_fields():
@@ -827,6 +842,7 @@ def test_the_tab_draws_real_positions_and_the_lego_view(monkeypatch):
     labels = {m.label for m in app.metric}
     assert {"S₀ (USD)", "P/L ตอนนี้", "หุ้นจริง", "FIX_C (bot)", "exposure จริง"} <= labels
     assert next(m for m in app.metric if m.label == "exposure จริง").value == "84.0%"
+    assert app.slider(key="payoff_range").value == (0, 200)                              # ค่าเริ่มต้น 0 ถึง 2 × S₀
     assert next(m for m in app.metric if m.label == "P/L ตอนนี้").value == "-220.00"
     assert any(c.value.startswith("④ = ③ + Eₙ สะสมของ bot (+20.00 USD)") for c in app.caption)
     assert len(app.button_group(key="payoff_lines").options) == 4

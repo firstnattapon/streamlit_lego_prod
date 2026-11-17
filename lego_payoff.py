@@ -41,6 +41,7 @@ from lego_charts import FILL_ALPHA, FONT_FAMILY, LINE, REFERENCE_DASH, theme_tok
 
 RISK_FREE = 0.04                 # r ของ Black-Scholes (แสดงใน caption) · ไม่มีปันผล
 GRID_POINTS = 241
+MIN_GRID_PCT = 1.0               # ln(0) = −∞ → ข้อมูลเริ่มที่ 1% ของ S₀ แม้ช่วงที่เลือกเริ่มที่ 0 (แกน x ยังเริ่มที่ 0)
 NEW_YORK = ZoneInfo("America/New_York")
 US_CLOSE = time(16, 0)           # option หมดอายุ 16:00 เวลา New York
 YEAR_SECONDS = 365.0 * 86400.0
@@ -505,8 +506,9 @@ def exposure_ratio(book: SymbolBook) -> float | None:
 
 def price_grid(spot: float, lo_pct: float = 40, hi_pct: float = 200,
                extra: Iterable[float] = (), n: int = GRID_POINTS) -> np.ndarray:
-    """ราคาห่างเท่ากันจาก lo% ถึง hi% ของ S₀ + จุดสำคัญ (S₀, strike, u*) ที่อยู่ในช่วง"""
-    lo, hi = spot * lo_pct / 100.0, spot * hi_pct / 100.0
+    """ราคาห่างเท่ากันจาก lo% ถึง hi% ของ S₀ + จุดสำคัญ (S₀, strike, u*) ที่อยู่ในช่วง
+    · lo ต่ำสุด MIN_GRID_PCT (ราคา 0 ทำให้เส้น ln เป็น −∞)"""
+    lo, hi = spot * max(lo_pct, MIN_GRID_PCT) / 100.0, spot * hi_pct / 100.0
     points = [spot, *[float(x) for x in extra if x is not None and math.isfinite(float(x))]]
     grid = np.concatenate([np.linspace(lo, hi, n), [p for p in points if lo <= p <= hi]])
     return np.unique(grid)
@@ -596,8 +598,10 @@ def lego_view_curves(chain: LegoChain, grid: np.ndarray) -> pd.DataFrame:
 
 
 def pct_grid(lo_pct: float = 40, hi_pct: float = 200, n: int = GRID_POINTS) -> np.ndarray:
-    """% ของ S₀ (100 = ราคาตอนนี้) สำหรับโหมดรวมพอร์ต"""
-    return np.unique(np.concatenate([np.linspace(lo_pct, hi_pct, n), [100.0]]))
+    """% ของ S₀ (100 = ราคาตอนนี้) สำหรับโหมดรวมพอร์ต · เริ่มอย่างน้อย MIN_GRID_PCT"""
+    lo_pct = max(lo_pct, MIN_GRID_PCT)
+    points = [100.0] if lo_pct <= 100.0 <= hi_pct else []
+    return np.unique(np.concatenate([np.linspace(lo_pct, hi_pct, n), points]))
 
 
 def portfolio_curves(books: Sequence[SymbolBook], pcts: np.ndarray, now: datetime,
@@ -855,7 +859,7 @@ def payoff_figure(df: pd.DataFrame, *, x_col: str = PRICE_COL, x_title: str = "�
                   now_pl: float | None = None, strikes: Sequence[float] = (),
                   u_star: float | None = None, theme: str | None = None,
                   title: str | None = None, subtitle: str | None = None,
-                  height: int = 580) -> go.Figure:
+                  x_start: float | None = None, height: int = 580) -> go.Figure:
     """มุมมองบัญชีจริง: เส้น ① ② ③ ④ (เฉพาะที่เลือกและมีข้อมูล) + เส้นตั้ง S₀ / strike / u* + จุดคุ้มทุนของ ①"""
     tok = theme_tokens(theme)
     fig = go.Figure()
@@ -882,6 +886,8 @@ def payoff_figure(df: pd.DataFrame, *, x_col: str = PRICE_COL, x_title: str = "�
                                  fillcolor=_rgba(green, FILL_ALPHA["excess"]) if band else None,
                                  hovertemplate=f"<b>%{{y:,.2f}}</b> USD  {LINE_NAMES[key]}<extra></extra>"))
     lo, hi = float(x.min()), float(x.max())
+    if x_start is not None:                    # เช่น ช่วง 0–200%: แกน x เริ่มที่ 0 แม้ข้อมูลเริ่มที่ 1%
+        lo = min(lo, float(x_start))
     full_y = _y_range(x, [df[k].to_numpy(dtype=float) for k in drawn], lo, hi)
     _zones(fig, tok, full_y)
     for k in strikes:
@@ -924,7 +930,7 @@ def lego_ledger_figure(df: pd.DataFrame, *, x_col: str = PRICE_COL, x_title: str
                        p_acted: float | None = None, u_star: float | None = None,
                        spot: float | None = None, theme: str | None = None,
                        title: str | None = None, subtitle: str | None = None,
-                       height: int = 540) -> go.Figure:
+                       x_start: float | None = None, height: int = 540) -> go.Figure:
     """มุมมอง LEGO model ledger: R(S) (เส้นประอ้างอิง สีเดียวกับ Rₙ ของแท็บ Live) + พื้น A(S) (สีเดียวกับ Aₙ)
 
     ไม่มีโซนกำไร/ขาดทุน เพราะ model ledger ไม่ใช่ P/L ของบัญชี
@@ -943,6 +949,8 @@ def lego_ledger_figure(df: pd.DataFrame, *, x_col: str = PRICE_COL, x_title: str
         customdata=df["gap"], hovertemplate=f"<b>%{{y:,.2f}}</b> USD  {LEGO_NAMES['A']}"
                                             "<br><b>%{customdata:,.2f}</b> USD  A − R(S)<extra></extra>"))
     lo, hi = float(x.min()), float(x.max())
+    if x_start is not None:
+        lo = min(lo, float(x_start))
     series = [df["R"].to_numpy(dtype=float), df["A_floor"].to_numpy(dtype=float)]
     full_y = _y_range(x, series, lo, hi)
     if u_star is not None and math.isfinite(u_star) and lo <= u_star <= hi:
