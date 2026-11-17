@@ -1,6 +1,6 @@
 """streamlit_app.py — Dashboard (read-only) อ่านจาก Firebase RTDB + Rebalancing 101
 
-4 แท็บ:
+5 แท็บ:
   📊 Live Dashboard   — อ่าน Firebase ครั้งเดียวต่อการโหลดหน้า (lego_live_data.Snapshot) แล้วแสดงใน
                         st.fragment: ตัวเลือก Chain (จำไว้ใน URL ?chain=) → หัวข้อ "หุ้น · Live" พร้อมสถานะ
                         สด/ค้าง/ผิดพลาด เวลาอัปเดต และปุ่มรีเฟรช → ตัวกรองวัน (UTC) → แท็บย่อย
@@ -14,6 +14,8 @@
   🌐 Web Apps         — คู่มือ/playground แบบโต้ตอบ (HTML ล้วนใน web_apps/ แสดงใน iframe)
                         คัดลอกจากแท็บ Web Apps ของ pages/Manual.py (leg-code):
                         Rebalancing 101 + Rebalancing Playground — ไม่เรียก Firebase
+  📐 Payoff           — เส้น payoff จาก position จริงใน Webull (lego_payoff.py + lego_webull_read.py: GET อย่างเดียว
+                        4 path ไม่ส่ง order ไม่สร้าง token) + มุมมอง LEGO model ledger จาก webull_lego_state ของ PROD
   ⚡ Cheat Sheet       — แท็บย่อย 📝 Summary: สรุป 10 ข้อ + ประโยคเดียว (cheat_sheet/summary.md)
                         และ 🔀 Diagrams: แผนภาพ Mermaid (.mmd ใน cheat_sheet/): main rebalancing,
                         rollover (beta += (Fix_c − Fix_c_new) * ln(P_acted / P₀)) และ Option Scale
@@ -89,6 +91,19 @@ from lego_live_data import (ERROR, LIVE, STALE, ChainView, Freshness, Snapshot, 
                             describe, fetch_snapshot, fmt_num, fmt_text, state_table)
 from lego_charts import (MAX_ACT_MARKERS, PLOTLY_CONFIG, ledger_figure,
                          total_excess_figure)
+
+# แท็บ 📐 Payoff — reload guard แบบเดียวกับด้านบน (hot deploy ต้องไม่ได้โมดูลรุ่นเก่าปนกับหน้าใหม่)
+import lego_payoff as payoff
+import lego_webull_read as _lego_webull_read
+
+_REQUIRED_PAYOFF_API = ("build_books", "book_curves", "lego_chains", "lego_view_curves",
+                        "portfolio_curves", "portfolio_lego", "payoff_figure", "lego_ledger_figure")
+if any(not hasattr(payoff, name) for name in _REQUIRED_PAYOFF_API):
+    payoff = importlib.reload(payoff)
+if not hasattr(_lego_webull_read, "READ_ONLY_ALLOWLIST"):
+    _lego_webull_read = importlib.reload(_lego_webull_read)
+
+from lego_webull_read import WebullReadError, fetch_account_snapshot, redact
 
 # Web Apps: คู่มือ/playground แบบ HTML ล้วน (self-contained) แสดงใน iframe ผ่าน
 # components.html — ชุดนี้คัดลอกมาจากแท็บ "🌐 Web Apps" ของ pages/Manual.py (leg-code)
@@ -700,6 +715,256 @@ def render_prod_banner(paper: bool = False) -> None:
                  "ตรวจ st.secrets ก่อนเชื่อตัวเลขในหน้านี้")
 
 
+# ---------------------------------------------------------------- 📐 Payoff (แท็บใหม่)
+# position จริงจาก Webull OpenAPI แบบอ่านอย่างเดียว (lego_webull_read: GET 4 path ไม่ส่ง order ไม่สร้าง token)
+# + state ของ bot จาก PROD (อ่าน 1 node + แถวล่าสุด 1 แถวต่อ chain) · สูตรทั้งหมดอยู่ใน lego_payoff
+WEBULL_SECRETS = ("WEBULL_APP_KEY", "WEBULL_APP_SECRET", "WEBULL_REGION_ID", "WEBULL_TOKEN_TXT")
+PAYOFF_TTL_S, PAYOFF_COOLDOWN_S = 300, 30      # ไม่แย่ง rate limit / token กับ bot PROD
+PAYOFF_ALL = "รวมพอร์ต"
+PAYOFF_VIEW_REAL, PAYOFF_VIEW_LEGO = "💵 บัญชีจริง (Webull)", "🧬 LEGO model ledger"
+PAYOFF_RANGE_DEFAULT = (40, 200)
+_RUN_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
+
+
+def _webull_ready() -> bool:
+    return all(_has_secret(key) for key in WEBULL_SECRETS)
+
+
+def _webull_fingerprint() -> str:
+    """cache รู้เมื่อ secrets เปลี่ยน (เช่น อัปเดต token) โดยไม่เก็บค่าจริง"""
+    raw = "|".join(str(st.secrets[key]) for key in WEBULL_SECRETS)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+@st.cache_data(ttl=PAYOFF_TTL_S, show_spinner=False)
+def _webull_snapshot(fingerprint: str) -> dict:
+    """เรียก Webull อย่างมาก 5 นาทีครั้งต่อชุด secrets (4 GET) — exception ไม่ถูก cache"""
+    return fetch_account_snapshot(
+        str(st.secrets["WEBULL_APP_KEY"]), str(st.secrets["WEBULL_APP_SECRET"]),
+        str(st.secrets["WEBULL_REGION_ID"]), str(st.secrets["WEBULL_TOKEN_TXT"]),
+        environment=str(st.secrets.get("WEBULL_ENVIRONMENT", "prod")))
+
+
+@st.cache_data(ttl=PAYOFF_TTL_S, show_spinner=False)
+def _payoff_lego_state() -> tuple[dict, dict]:
+    """PROD เท่านั้น: webull_lego_state + แถวล่าสุด 1 แถวต่อ chain (ไม่อ่าน webull_lego_rows ทั้ง node)"""
+    if not (_has_secret("FIREBASE_SA_JSON") and _prod_url()):
+        return {}, {}
+    _init()
+    state = _ref("webull_lego_state").get() or {}
+    rows: dict = {}
+    if isinstance(state, dict):
+        for chain_key, pointer in state.items():
+            run_id = pointer.get("last_run_id") if isinstance(pointer, dict) else None
+            if isinstance(run_id, str) and _RUN_ID.fullmatch(run_id):
+                rows[chain_key] = _ref(f"webull_lego_rows/{run_id}").get()
+    return payoff.lego_chains(state, rows)
+
+
+def _payoff_status_line(snap: dict) -> str:
+    stamp = pd.to_datetime(snap.get("as_of"), utc=True, errors="coerce")
+    when = "—" if pd.isna(stamp) else stamp.strftime("%Y-%m-%d %H:%M UTC")
+    status = sorted({str(q.get("trade_status")) for q in (snap.get("quotes") or {}).values()
+                     if isinstance(q, dict) and q.get("trade_status")})
+    return f"ดึงเมื่อ {when} · ตลาด: {', '.join(status) or '—'} · {snap.get('account_count', 0)} บัญชี"
+
+
+def _payoff_refresh_button() -> None:
+    """อ่าน Webull + Firebase ใหม่ · กดซ้ำได้หลัง cooldown 30 วินาที (กัน rate limit ร่วมกับ bot)"""
+    now = pd.Timestamp.now(tz="UTC").timestamp()
+    wait = PAYOFF_COOLDOWN_S - (now - float(st.session_state.get("payoff_refreshed_at", 0.0)))
+    if st.button("⟳ รีเฟรช", key="payoff_refresh", disabled=wait > 0,
+                 help=(f"รีเฟรชได้อีกใน {wait:.0f} วินาที" if wait > 0
+                       else f"ข้อมูลเก็บไว้ {PAYOFF_TTL_S // 60} นาที กดเพื่อดึงใหม่")):
+        st.session_state["payoff_refreshed_at"] = now
+        _webull_snapshot.clear()
+        _payoff_lego_state.clear()
+        st.rerun()
+
+
+def _payoff_choice(key: str, options: list, default):
+    """ค่าใน session state ที่ไม่อยู่ในตัวเลือกแล้ว → กลับไปค่าเริ่มต้น (widget ไม่ส่ง default ซ้ำกับ state)"""
+    if st.session_state.get(key) not in options:
+        st.session_state[key] = default
+
+
+def _payoff_notes(notes: list[str]) -> None:
+    for note in dict.fromkeys(n for n in notes if n):          # ไม่ซ้ำ คงลำดับ
+        st.caption(f"ⓘ {note}")
+
+
+def _payoff_range() -> tuple[int, int]:
+    value = st.session_state.get("payoff_range")
+    if not (isinstance(value, (list, tuple)) and len(value) == 2):
+        st.session_state["payoff_range"] = PAYOFF_RANGE_DEFAULT
+    lo, hi = st.slider("ช่วงราคา (% ของราคาปัจจุบัน S₀)", 20, 300, step=5, key="payoff_range")
+    return lo, hi
+
+
+def _payoff_real(books: list, combined: bool, now) -> list[str]:
+    """มุมมองบัญชีจริง (P/L เทียบทุนของ Webull) — คืนหมายเหตุของเส้นที่ซ่อน"""
+    names = list(payoff.LINE_NAMES.values())
+    current = st.session_state.get("payoff_lines")
+    if not isinstance(current, list) or not set(current) <= set(names):
+        st.session_state["payoff_lines"] = names
+    picked = st.pills("เส้น", names, selection_mode="multi", key="payoff_lines") or []
+    show = [key for key, name in payoff.LINE_NAMES.items() if name in picked]
+    lo, hi = _payoff_range()
+    theme = _streamlit_theme()
+    if combined:
+        df = payoff.portfolio_curves(books, payoff.pct_grid(lo, hi), now)
+        now_pl = sum(book.unrealized for book in books)
+        cards = st.columns(3)
+        cards[0].metric("P/L ตอนนี้ (รวม)", f"{now_pl:+,.2f}")
+        cards[1].metric("จำนวนตัว", len(books))
+        cards[2].metric("FIX_C รวม (bot)", fmt_num(sum(b.usable_chain.fix_c for b in books
+                                                      if b.usable_chain) or None))
+        fig = payoff.payoff_figure(df, x_col=payoff.PCT_COL, show=show, spot=100.0, now_pl=now_pl,
+                                   x_title="% ของราคาปัจจุบัน (สมมติทุกตัวขยับ % เท่ากัน)", theme=theme)
+        x_col, at = payoff.PCT_COL, payoff.TABLE_PCTS
+    else:
+        book = books[0]
+        if book.spot is None:
+            st.info(f"{book.symbol}: ไม่มีราคาหุ้น จึงวาดเส้นไม่ได้")
+            return []
+        chain = book.usable_chain
+        strikes = sorted({leg.strike for leg in book.options})
+        grid = payoff.price_grid(book.spot, lo, hi, extra=[*strikes, chain.u_star if chain else None])
+        df = payoff.book_curves(book, now, grid)
+        real = sum(leg.qty for leg in book.legs if leg.kind == "stock")
+        leaps = " + ".join(f"{leg.qty:g}×{'C' if leg.kind == 'call' else 'P'}{leg.strike:g}"
+                           for leg in book.options) or "—"
+        expiries = " · ".join(f"{leg.occ} หมดอายุ {leg.expiry:%d/%m/%Y}" for leg in book.options) or None
+        exposure = payoff.exposure_ratio(book)
+        cards = st.columns(6)
+        cards[0].metric("S₀ (USD)", f"{book.spot:,.2f}")
+        cards[1].metric("P/L ตอนนี้", f"{book.unrealized:+,.2f}")
+        cards[2].metric("หุ้นจริง", f"{real:,.2f}")
+        cards[3].metric("Option", leaps, help=expiries)
+        cards[4].metric("FIX_C (bot)", fmt_num(chain.fix_c if chain else None))
+        cards[5].metric("exposure จริง", "—" if exposure is None else f"{exposure:.1%}",
+                        help="(หุ้นจริง + Σ delta × 100 × สัญญา) × S₀ ÷ FIX_C — bot นับ LEAPS เป็นหุ้นเต็ม (delta 1)")
+        fig = payoff.payoff_figure(df, show=show, spot=book.spot, now_pl=book.unrealized,
+                                   strikes=strikes, u_star=chain.u_star if chain else None, theme=theme)
+        x_col, at = payoff.PRICE_COL, [book.spot * pct / 100 for pct in payoff.TABLE_PCTS]
+    st.plotly_chart(fig, theme=None, config=PLOTLY_CONFIG, key="payoff_chart")
+    hidden = [payoff.LINE_SHORT[k] for k in show if not df[k].notna().all()]
+    with st.expander("ตารางค่า"):
+        st.dataframe(payoff.curve_table(df, x_col, {k: payoff.LINE_NAMES[k] for k in payoff.LINE_KEYS}, at),
+                     hide_index=True)
+        if not combined:
+            st.dataframe(payoff.legs_frame(books[0].legs), hide_index=True)
+    st.caption(f"สมมติฐาน: r = {payoff.RISK_FREE:.0%} · IV จาก Webull (หรือแก้จาก mark) · ① ③ ราคาขยับทันทีวันนี้ · "
+               "③ rebalance ต่อเนื่องจากหุ้นเป้าหมาย FIX_C/S − L (ต่างจากหุ้นจริงไม่เกินแถบ DIFF) ไม่จำลอง DNA gate/DIFF "
+               "และไม่นับ E ที่ได้เพิ่มจากการแกว่ง จึงเป็นค่าขั้นต่ำ · มีเงินสดพอซื้อขาลง · เกิน u* = FIX_C/L "
+               "SELL เกินหุ้นจริง → PASS (ของจริงเป็นขั้น อาจเหลือหุ้นค้างเล็กน้อย) · "
+               "เส้น ① อยู่เหนือ ③ ที่ปลายทั้งสองข้าง = ราคาวิ่งทางเดียวแพ้ถือเฉยๆ")
+    return [f"ซ่อนเส้น {', '.join(hidden)} เพราะข้อมูลไม่พอ (เหตุผลด้านล่าง)"] if hidden else []
+
+
+def _payoff_lego(books: list, combined: bool) -> None:
+    """มุมมอง LEGO model ledger — ตัวเลขชุดเดียวกับแท็บ Live ห้ามปนกับ P/L ของ Webull"""
+    lo, hi = _payoff_range()
+    theme = _streamlit_theme()
+    if combined:
+        df = payoff.portfolio_lego(books, payoff.pct_grid(lo, hi))
+        if df is None:
+            st.info("ไม่มี chain ของ bot ที่ใช้ได้ (ดูเหตุผลด้านล่าง)")
+            return
+        usable = [b.usable_chain for b in books if b.usable_chain]
+        cards = st.columns(3)
+        cards[0].metric("Σ Aₙ", f"{sum(c.actual for c in usable):+,.2f}")
+        cards[1].metric("Σ R_basis", f"{sum(c.r_basis for c in usable):+,.2f}")
+        cards[2].metric("Σ Eₙ", f"{sum(c.excess for c in usable):+,.2f}")
+        fig = payoff.lego_ledger_figure(df, x_col=payoff.PCT_COL, theme=theme,
+                                        x_title="% ของราคาปัจจุบัน (สมมติทุกตัวขยับ % เท่ากัน)")
+        x_col, at = payoff.PCT_COL, payoff.TABLE_PCTS
+    else:
+        book = books[0]
+        chain = book.usable_chain
+        if chain is None or book.spot is None:
+            st.info(book.chain_issue or f"{book.symbol}: ไม่มีราคาหุ้น")
+            return
+        grid = payoff.price_grid(book.spot, lo, hi, extra=[chain.p_acted, chain.u_star])
+        df = payoff.lego_view_curves(chain, grid)
+        cards = st.columns(5)
+        cards[0].metric("P₀", fmt_num(chain.p0))
+        cards[1].metric("P_acted", f"{chain.p_acted:,.4f}")
+        cards[2].metric("Aₙ สะสม", f"{chain.actual:+,.2f}")
+        cards[3].metric("R_basis", f"{chain.r_basis:+,.2f}")
+        cards[4].metric("Eₙ สะสม", f"{chain.excess:+,.2f}")
+        fig = payoff.lego_ledger_figure(df, p_acted=chain.p_acted, u_star=chain.u_star, theme=theme)
+        x_col, at = payoff.PRICE_COL, [book.spot * pct / 100 for pct in payoff.TABLE_PCTS]
+    st.plotly_chart(fig, theme=None, config=PLOTLY_CONFIG, key="payoff_lego_chart")
+    with st.expander("ตารางค่า"):
+        st.dataframe(payoff.curve_table(df, x_col, {"R": payoff.LEGO_NAMES["R"],
+                                                    "A_floor": payoff.LEGO_NAMES["A"],
+                                                    "gap": "A − R(S)"}, at), hide_index=True)
+    st.caption("model ledger (semantics execution_terminal_funding_v3, LEAPS นับเป็นหุ้นเต็ม) — "
+               "ตัวเลขชุดเดียวกับแท็บ Live ไม่ใช่กำไรจริงในบัญชี · R(S) = R_basis + FIX_C·ln(S/P_acted) · "
+               "พื้น A(S) = Aₙ + FIX_C·ln(min(S,u*)/P_acted) · ที่ P_acted ได้ Aₙ และ R_basis ตรงกับ state · "
+               "ถึง u* ช่องห่าง A − R = Eₙ ปัจจุบัน (ของจริง ≥ เพราะ E ไม่ลด) · เกิน u* bot pass: Eₙ แช่แข็ง "
+               "แต่ R(S) ยังวิ่ง ช่องห่างจึงหด = แพ้ถือเฉยๆ")
+
+
+def _render_payoff(snap: dict, chains: dict, chain_issues: dict, now) -> None:
+    head, action = st.columns([6, 1], vertical_alignment="center")
+    with head:
+        st.subheader("📐 Payoff · บัญชีจริง (Webull)")
+        st.caption(_payoff_status_line(snap) + " · อ่านอย่างเดียว · ไม่ขึ้นกับตัวเลือก PROD/PAPER ใน sidebar")
+    with action:
+        _payoff_refresh_button()
+    books, notes = payoff.build_books(snap, chains, chain_issues, now)
+    notes = list(snap.get("notes") or []) + notes
+    if not books:
+        st.info("ไม่มี position ในบัญชีตอนนี้")
+        _payoff_notes(notes)
+        return
+    choices = [book.symbol for book in books] + ([PAYOFF_ALL] if len(books) > 1 else [])
+    _payoff_choice("payoff_symbol", choices, choices[0])
+    _payoff_choice("payoff_view", [PAYOFF_VIEW_REAL, PAYOFF_VIEW_LEGO], PAYOFF_VIEW_REAL)
+    pick = st.segmented_control("ตัว", choices, key="payoff_symbol") or choices[0]
+    view = st.segmented_control("มุมมอง", [PAYOFF_VIEW_REAL, PAYOFF_VIEW_LEGO],
+                                key="payoff_view") or PAYOFF_VIEW_REAL
+    combined = pick == PAYOFF_ALL
+    picked = books if combined else [book for book in books if book.symbol == pick]
+    if view == PAYOFF_VIEW_REAL:
+        notes += _payoff_real(picked, combined, now)
+    else:
+        _payoff_lego(picked, combined)
+    notes += [n for book in picked for n in (*book.notes, book.chain_issue)]
+    _payoff_notes(notes)
+
+
+@st.fragment
+def payoff_panel(snap: dict, chains: dict, chain_issues: dict) -> None:
+    """เนื้อหาแท็บ Payoff — กดเลือกในแท็บ rerun แค่ส่วนนี้ (ไม่เรียก Webull / Firebase ซ้ำ)"""
+    try:
+        _render_payoff(snap, chains, chain_issues, pd.Timestamp.now(tz="UTC").to_pydatetime())
+    except Exception as exc:                 # ไม่พาอีก 4 แท็บล้ม
+        st.error(f"แสดงแท็บ Payoff ไม่ได้ ({type(exc).__name__}: {redact(exc)})")
+
+
+def render_payoff_tab() -> None:
+    if not _webull_ready():
+        st.info("ตั้ง st.secrets: WEBULL_APP_KEY, WEBULL_APP_SECRET, WEBULL_REGION_ID และ WEBULL_TOKEN_TXT "
+                "ก่อน จึงจะเห็น payoff จาก position จริง (แท็บนี้อ่านอย่างเดียว ไม่ส่ง order ไม่สร้าง token)")
+        return
+    try:
+        with st.spinner("กำลังดึง position จาก Webull"):
+            snap = _webull_snapshot(_webull_fingerprint())
+    except Exception as exc:     # WebullReadError = ข้อความไทย (redact แล้ว) · อื่น ๆ = ชนิดเท่านั้น
+        st.error(f"ดึงข้อมูล Webull ไม่ได้ — {exc}" if isinstance(exc, WebullReadError)
+                 else f"ดึงข้อมูล Webull ไม่ได้ ({type(exc).__name__})")
+        return
+    try:
+        chains, chain_issues = _payoff_lego_state()
+    except Exception as exc:     # Firebase ล้ม → ไม่มีเส้น ③ / มุมมอง LEGO (fail closed) + เหตุผล
+        chains, chain_issues = {}, {}
+        st.caption(f"ⓘ อ่าน state ของ bot ไม่ได้ ({type(exc).__name__}) — ซ่อนเส้น ③ และมุมมอง LEGO")
+    payoff_panel(snap, chains, chain_issues)
+
+
 def main():
     st.set_page_config(page_title="LEGO PROD", layout="wide")
     st.title("🧬 LEGO Shannon Demon: PROD")
@@ -714,14 +979,17 @@ def main():
                                  key="database") == DATABASE_PAPER
     render_prod_banner(paper)
 
-    tab_live, tab_101, tab_web, tab_cheat = st.tabs(
-        ["📊 Live Dashboard", "🎓 Rebalancing 101", "🌐 Web Apps", "⚡ Cheat Sheet"])
+    # 📐 Payoff อยู่ก่อน ⚡ Cheat Sheet: เทสต์เดิมกำหนดให้ Cheat Sheet เป็นแท็บสุดท้าย
+    tab_live, tab_101, tab_web, tab_payoff, tab_cheat = st.tabs(
+        ["📊 Live Dashboard", "🎓 Rebalancing 101", "🌐 Web Apps", "📐 Payoff", "⚡ Cheat Sheet"])
     with tab_live:
         render_live_dashboard(paper)
     with tab_101:
         render_rebalancing_101()
     with tab_web:
         render_web_apps()
+    with tab_payoff:
+        render_payoff_tab()
     with tab_cheat:
         render_cheat_sheets()
 
