@@ -130,7 +130,7 @@ def test_bad_positions_are_skipped_with_field_names_only():
     out, problems = payoff.parse_positions(broken)
     assert out == []
     assert problems[0] == "EQUITY: ไม่พบ field quantity, last_price, unrealized_profit_loss"
-    assert problems[1].startswith("OPTION: ไม่พบ field items")
+    assert problems[1] == "OPTION: ไม่พบ legs/items, unrealized_profit_loss (มี field: instrument_type, symbol)"
     assert "CRYPTO" in problems[2]
     assert not any("123.45" in p for p in problems)                  # ไม่มีค่าบัญชีในข้อความ
 
@@ -144,6 +144,74 @@ def test_sold_options_are_negative_and_a_combo_keeps_its_pl_on_the_first_leg():
     assert (long_leg.qty, short_leg.qty) == (1.0, -1.0)
     assert (long_leg.unrealized, short_leg.unrealized) == (50.0, 0.0)
     assert (long_leg.mark, short_leg.mark) == (pytest.approx(3.2), pytest.approx(2.0))
+
+
+# รูปแบบทางการของ Webull OpenAPI v3 (GET /trading/assets/positions/list): option อยู่ใน "legs" และไม่มี "side"
+# (เอกสาร developer.webull.co.th — Account Positions) · รูปแบบของ MCP ที่ใช้ตอนพัฒนาคือ "items" + "side"
+V3_CALL = {"position_id": "P-2", "currency": "USD", "quantity": "1", "symbol": "AAA", "option_strategy": "SINGLE",
+           "instrument_type": "OPTION", "cost_price": "4.90", "last_price": "3.30",
+           "unrealized_profit_loss": "-160.00",
+           "legs": [{"leg_id": "L-1", "symbol": "AAA", "quantity": "1", "option_type": "CALL",
+                     "option_expire_date": "2027-05-21", "option_exercise_price": "7",
+                     "option_contract_multiplier": "100", "option_contract_deliverable": "100",
+                     "expiration_type": "AM"}]}
+V3_POSITIONS = [STOCK, V3_CALL]
+
+
+def _shape(leg: payoff.Leg) -> tuple:
+    return (leg.symbol, leg.kind, leg.qty, leg.multiplier, leg.mark, leg.unrealized, leg.strike, leg.expiry,
+            leg.occ, leg.iv, leg.delta)
+
+
+def test_v3_legs_parse_like_the_mcp_items():
+    v3, problems = payoff.parse_positions(V3_POSITIONS, OPTION_QUOTES)
+    assert not problems
+    assert [_shape(leg) for leg in v3] == [_shape(leg) for leg in legs()]
+    assert v3[1].cost == 4.90                                         # legs ไม่มีทุน → ใช้ของ position (ขาเดียว)
+    assert payoff.option_contracts(V3_POSITIONS) == [OCC]
+    assert payoff.underlying_symbols(V3_POSITIONS) == ["AAA"]
+
+
+def test_occ_symbols_on_the_leg_or_position_give_the_underlying_and_the_contract():
+    assert payoff.parse_occ(OCC) == {"symbol": "AAA", "expiry": date(2027, 5, 21), "kind": "call", "strike": 7.0}
+    assert payoff.parse_occ("BRK.B 270115P00450000")["symbol"] == "BRK.B"
+    assert payoff.parse_occ("AAA") is None and payoff.parse_occ("AAA271399C00007000") is None
+    leg_occ = dict(V3_CALL, legs=[{"leg_id": "L-1", "symbol": OCC, "quantity": "1"}])     # ไม่มี field option อื่น
+    position_occ = {k: v for k, v in V3_CALL.items() if k != "legs"} | {"symbol": OCC}     # ไม่มี legs เลย
+    for shape in (leg_occ, position_occ):
+        out, problems = payoff.parse_positions([STOCK, shape], OPTION_QUOTES)
+        assert not problems and _shape(out[1]) == _shape(legs()[1])
+        assert payoff.underlying_symbols([STOCK, shape]) == ["AAA"]
+        assert payoff.option_contracts([shape]) == [OCC]
+
+
+def test_v3_short_legs_use_the_sign_of_the_quantity():
+    short = dict(V3_CALL, legs=[dict(V3_CALL["legs"][0], quantity="-2")])
+    assert payoff.parse_positions([short])[0][0].qty == -2.0
+    short_total = dict(V3_CALL, quantity="-1")
+    assert payoff.parse_positions([short_total])[0][0].qty == -1.0
+    assert payoff.parse_positions([V3_CALL])[0][0].qty == 1.0                    # ไม่บอกอะไร = ซื้อ
+
+
+def test_an_unreadable_leg_reports_field_names_only():
+    broken = dict(V3_CALL, legs=[{"leg_id": "L-9", "symbol": "AAA", "quantity": "1", "cost": "777.77"}])
+    out, problems = payoff.parse_positions([broken])
+    assert out == [] and problems == [
+        "OPTION: ขาอ่านไม่ได้ ต้องมี option_type / option_expire_date / option_exercise_price "
+        "(หรือ symbol แบบ OCC) และ quantity (มี field: cost, leg_id, quantity, symbol)"]
+    assert "777.77" not in problems[0]
+
+
+def test_v3_positions_build_full_books_with_the_bot_chain():
+    chains, issues = payoff.lego_chains(STATE, ROWS)
+    books, notes = payoff.build_books({"positions": V3_POSITIONS, "options": OPTION_QUOTES}, chains, issues, NOW)
+    book = books[0]
+    assert not notes and book.chain_issue is None                     # LEAPS 1 × 100 = bot 100
+    assert book.unrealized == pytest.approx(-220.0)                   # หุ้น + option
+    df = payoff.book_curves(book, NOW, np.array(sorted(EXAMPLE)))
+    for _, row in df.iterrows():
+        assert row["rebalance"] == pytest.approx(EXAMPLE[row["price"]][2], abs=0.01)
+    assert df[list(payoff.LINE_KEYS)].notna().all().all()
 
 
 def test_token_txt_needs_three_lines():
@@ -426,6 +494,15 @@ def test_line_four_is_line_three_plus_excess_with_the_band_between():
     assert fig.layout.legend.traceorder == "normal"                             # ① ② ③ ④ ตามลำดับ
 
 
+def test_zoom_buttons_stay_readable_in_dark_mode():
+    df = payoff.symbol_curves(legs(), 9.0, NOW, chain(), payoff.price_grid(9.0))
+    for theme in ("light", "dark"):
+        menu = payoff.payoff_figure(df, spot=9.0, theme=theme).layout.updatemenus[0]
+        # Plotly ทาสีปุ่มที่เลือก/ชี้เป็น #F4FAFF ตายตัว → ตัวหนังสือต้องเข้มบนพื้นอ่อนทุกธีม
+        assert menu.font.color == payoff.MENU_COLORS["text"] == "#0b0b0b"
+        assert menu.bgcolor == payoff.MENU_COLORS["bg"]
+
+
 def test_lego_figure_has_r_and_a():
     c = chain()
     fig = payoff.lego_ledger_figure(payoff.lego_view_curves(c, payoff.price_grid(9.0)),
@@ -494,6 +571,17 @@ def test_fetch_reads_four_get_endpoints_with_the_token_header(http):
     assert all("account_id" not in p and "account_number" not in p for p in snap["positions"])
     assert snap["quotes"]["AAA"]["trade_status"] == "TRADING"
     assert snap["options"][OCC]["imp_vol"] == "0.80"
+
+
+def test_fetch_with_v3_positions_quotes_the_underlying_and_the_option(http):
+    http.routes[("GET", "/trading/assets/positions/list")] = (
+        200, [dict(STOCK), dict(V3_CALL, symbol=OCC, legs=[dict(V3_CALL["legs"][0], symbol=OCC)])])
+    snap = fetch()
+    urls = {p: url for _, p, _, url in http.calls}
+    assert "symbols=AAA&" in urls["/market-data/stocks/snapshots/list"]          # ไม่ส่ง OCC ไปขอราคาหุ้น
+    assert f"symbols={OCC}&" in urls["/market-data/options/snapshots/list"]
+    books, notes = payoff.build_books(snap, {}, {}, NOW)
+    assert [leg.kind for leg in books[0].legs] == ["stock", "call"] and books[0].options[0].iv == 0.8
 
 
 def _sdk_requests():
@@ -762,6 +850,31 @@ def test_the_portfolio_view_sums_every_symbol(monkeypatch):
     assert not app.exception and not app.error
     assert next(m for m in app.metric if m.label == "P/L ตอนนี้ (รวม)").value == "-204.50"
     assert any("BBB: ไม่มี chain ของ bot" in c.value for c in app.caption)
+
+
+def test_v3_snapshot_shows_the_option_and_all_lines(monkeypatch):
+    app = payoff_app(monkeypatch, snap=snapshot(positions=V3_POSITIONS))
+    app.run(timeout=30)
+    assert not app.exception and not app.error and not app.warning
+    metrics = {m.label: m.value for m in app.metric}
+    assert metrics["Option"] == "1×C7" and metrics["P/L ตอนนี้"] == "-220.00"
+    assert metrics["FIX_C (bot)"] == "1500.00" and metrics["exposure จริง"] == "84.0%"
+    assert not any("ซ่อนเส้น" in c.value for c in app.caption)
+
+
+def test_a_skipped_position_is_a_warning_at_the_top(monkeypatch):
+    broken = {k: v for k, v in V3_CALL.items() if k != "legs"}
+    app = payoff_app(monkeypatch, snap=snapshot(positions=[STOCK, broken]))
+    app.run(timeout=30)
+    assert not app.exception
+    assert len(app.warning) == 1 and app.warning[0].value.startswith("P/L ไม่ครบ: ข้าม position ที่อ่านไม่ได้")
+    assert "มี field: cost_price, currency" in app.warning[0].value and "-160.00" not in app.warning[0].value
+
+
+def test_the_reload_guard_knows_the_v3_parser():
+    import streamlit_app
+    assert {"parse_occ", "underlying_symbols", "SKIP_PREFIX"} <= set(streamlit_app._REQUIRED_PAYOFF_API)
+    assert webull_read.SNAPSHOT_SCHEMA >= 2
 
 
 def test_a_webull_error_stays_inside_the_tab(monkeypatch):
