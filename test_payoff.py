@@ -162,6 +162,7 @@ def test_the_three_lines_match_the_worked_example():
         assert row["t0"] == pytest.approx(t0, abs=0.01)
         assert row["expiry"] == pytest.approx(expiry, abs=0.01)
         assert row["rebalance"] == pytest.approx(rebalance, abs=0.01)
+        assert row["rebalance_e"] == pytest.approx(rebalance + 20.0, abs=0.01)    # ④ = ③ + Eₙ
 
 
 def test_t0_and_rebalance_pass_through_today_and_expiry_drops_the_time_value():
@@ -170,6 +171,7 @@ def test_t0_and_rebalance_pass_through_today_and_expiry_drops_the_time_value():
     assert df["t0"].iloc[0] == pytest.approx(U0, abs=1e-9)
     assert df["rebalance"].iloc[0] == pytest.approx(U0, abs=1e-9)
     assert df["expiry"].iloc[0] == pytest.approx(U0 - 100 * (3.30 - (9 - 7)), abs=1e-9)   # −350
+    assert df["rebalance_e"].iloc[0] == pytest.approx(U0 + chain().excess, abs=1e-9)     # −200
 
 
 def test_rebalance_is_lego_delta_r_plus_the_leaps_gap_below_u_star():
@@ -206,6 +208,7 @@ def test_the_expiry_line_uses_the_nearest_expiry_and_values_later_options_by_bs(
 def test_lines_fail_closed_when_data_is_missing():
     no_chain = payoff.symbol_curves(legs(), 9.0, NOW, None, np.array([8.0, 9.0, 10.0]))
     assert no_chain["rebalance"].isna().all() and no_chain["t0"].notna().all()
+    assert no_chain["rebalance_e"].isna().all()                       # ④ ต้องมี chain เหมือน ③
     no_iv = [payoff.Leg(**{**leg.__dict__, "iv": None}) if leg.is_option else leg for leg in legs()]
     df = payoff.symbol_curves(no_iv, 9.0, NOW, chain(), np.array([8.0, 9.0, 10.0]))
     assert df["t0"].isna().all() and df["rebalance"].isna().all() and df["expiry"].notna().all()
@@ -222,6 +225,7 @@ def test_portfolio_at_zero_percent_is_the_sum_of_todays_pl():
     at_zero = df[df[payoff.PCT_COL] == 100.0].iloc[0]
     assert at_zero["t0"] == pytest.approx(-220.0 + 15.5)
     assert np.isnan(at_zero["rebalance"])                             # BBB ไม่มี chain → เส้นรวมหาย
+    assert np.isnan(at_zero["rebalance_e"])
 
 
 def test_break_evens_interpolate_zero_crossings():
@@ -350,6 +354,21 @@ def test_payoff_figure_draws_only_finite_selected_lines():
     assert fig.layout.paper_bgcolor == payoff.theme_tokens("dark")["surface"]
     only_t0 = payoff.payoff_figure(df, show=["t0"], theme="light")
     assert [t.name for t in only_t0.data if t.mode == "lines"] == [payoff.LINE_NAMES["t0"]]
+
+
+def test_line_four_is_line_three_plus_excess_with_the_band_between():
+    c = chain()
+    df = payoff.symbol_curves(legs(), 9.0, NOW, c, payoff.price_grid(9.0, 40, 200, extra=[7.0, 15.0]))
+    assert np.allclose(df["rebalance_e"] - df["rebalance"], c.excess)
+    fig = payoff.payoff_figure(df, show=payoff.LINE_KEYS, spot=9.0, now_pl=-220.0, theme="light")
+    lines = {t.name: t for t in fig.data if t.mode == "lines"}
+    four, three = lines[payoff.LINE_NAMES["rebalance_e"]], lines[payoff.LINE_NAMES["rebalance"]]
+    assert four.line.color == three.line.color and four.line.dash == "dot"      # ตัวตนเดียวกับ ③
+    assert four.fill == "tonexty" and three.fill is None                        # แถบ Eₙ ระหว่าง ③ กับ ④
+    alone = payoff.payoff_figure(df, show=["t0", "rebalance_e"], theme="dark")
+    assert next(t for t in alone.data if t.name == payoff.LINE_NAMES["rebalance_e"]).fill is None
+    assert len([a for a in fig.layout.annotations if a.text.startswith(("①", "②", "③", "④"))]) == 4
+    assert fig.layout.legend.traceorder == "normal"                             # ① ② ③ ④ ตามลำดับ
 
 
 def test_lego_figure_has_r_and_a():
@@ -664,6 +683,8 @@ def test_the_tab_draws_real_positions_and_the_lego_view(monkeypatch):
     assert {"S₀ (USD)", "P/L ตอนนี้", "หุ้นจริง", "FIX_C (bot)", "exposure จริง"} <= labels
     assert next(m for m in app.metric if m.label == "exposure จริง").value == "84.0%"
     assert next(m for m in app.metric if m.label == "P/L ตอนนี้").value == "-220.00"
+    assert any(c.value.startswith("④ = ③ + Eₙ สะสมของ bot (+20.00 USD)") for c in app.caption)
+    assert len(app.button_group(key="payoff_lines").options) == 4
     app.button_group(key="payoff_view").set_value(payoff_view_lego()).run(timeout=30)
     assert not app.exception and not app.error
     lego = {m.label: m.value for m in app.metric}
@@ -709,3 +730,5 @@ def test_without_bot_state_line_three_is_hidden_with_a_reason(monkeypatch):
     assert any("ซ่อนเส้น ③" in c for c in captions)
     assert any("ไม่มี chain ของ bot" in c for c in captions)
     assert next(m for m in app.metric if m.label == "FIX_C (bot)").value == "—"
+    assert any("ซ่อนเส้น ③, ④" in c for c in captions)
+    assert not any(c.startswith("④ = ③ + Eₙ") for c in captions)

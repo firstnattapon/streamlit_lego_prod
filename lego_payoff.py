@@ -13,6 +13,9 @@ positions, U₀ = Σ ``unrealized_profit_loss`` ทุก leg ของตัว
        FIX_C·ln(S/S₀) + [m·n·ΔBS − L·(S − S₀)] เมื่อ S, S₀ ≤ u*
      หุ้นจริงเป้าหมาย = FIX_C/u − L และ SELL ได้ไม่เกินหุ้นจริง (PASS_SELL_EXCEEDS_REAL) → เกิน u* ส่วนหุ้นราบ
      rebalance ต่อเนื่อง ไม่จำลอง DNA gate/DIFF และไม่นับ E ที่ได้เพิ่มจากการแกว่ง จึงเป็นค่าขั้นต่ำ
+  ④ ③ + Eₙ           เส้น ③ บวก Eₙ สะสมของ bot (``execution_cashflow.excess`` ใน state) — E ที่เก็บจากความแกว่งแล้ว
+                     ไม่อยู่ใน unrealized ของ Webull (เป็นเงินสดที่ปิดไปแล้ว) · Eₙ มาจาก model ledger ของ bot
+                     เส้นนี้จึงเป็นเส้นเดียวที่รวม 2 ledger และระบุชื่อไว้ชัด · ห่างจาก ③ เท่ากับ Eₙ ทุกราคา
 
 🧬 LEGO model ledger — ตัวเลขชุดเดียวกับแท็บ Live (semantics execution_terminal_funding_v3: Eₙ = Aₙ − R_basis)
   R(S)       = R_basis + FIX_C·ln(S / P_acted)
@@ -33,7 +36,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
-from lego_charts import FONT_FAMILY, LINE, REFERENCE_DASH, theme_tokens
+from lego_charts import FILL_ALPHA, FONT_FAMILY, LINE, REFERENCE_DASH, theme_tokens
 
 RISK_FREE = 0.04                 # r ของ Black-Scholes (แสดงใน caption) · ไม่มีปันผล
 GRID_POINTS = 241
@@ -44,9 +47,10 @@ CONSISTENCY_TOL = 0.01           # หุ้น: Webull กับ state ขอ�
 IV_BOUNDS = (1e-4, 5.0)
 
 VALUE_COL, GAP_COL = "มูลค่าพอร์ต (USD)", "ส่วนต่างเป้าหมาย (USD)"   # FIX_C = Vₙ − gapₙ (E1)
-LINE_KEYS = ("t0", "expiry", "rebalance")
-LINE_NAMES = {"t0": "① T+0 วันนี้", "expiry": "② ณ หมดอายุ LEAPS", "rebalance": "③ bot rebalance ต่อ"}
-LINE_SHORT = {"t0": "①", "expiry": "②", "rebalance": "③"}
+LINE_KEYS = ("t0", "expiry", "rebalance", "rebalance_e")
+LINE_NAMES = {"t0": "① T+0 วันนี้", "expiry": "② ณ หมดอายุ LEAPS", "rebalance": "③ bot rebalance ต่อ",
+              "rebalance_e": "④ ③ + Eₙ"}
+LINE_SHORT = {"t0": "①", "expiry": "②", "rebalance": "③", "rebalance_e": "④"}
 LEGO_NAMES = {"R": "R(S) อ้างอิง", "A": "พื้น A(S)"}
 PRICE_COL, PCT_COL = "price", "pct"
 TABLE_PCTS = (50, 75, 90, 100, 110, 125, 150, 200)
@@ -492,7 +496,10 @@ def _log_floor(fix_c: float, leaps: float, u: np.ndarray | float) -> np.ndarray:
 
 def symbol_curves(legs: Sequence[Leg], spot: float, now: datetime, chain: LegoChain | None,
                   grid: np.ndarray, r: float = RISK_FREE) -> pd.DataFrame:
-    """price, t0, expiry, rebalance (USD เทียบทุนของ Webull) · ข้อมูลไม่พอ → NaN ทั้งเส้น"""
+    """price, t0, expiry, rebalance, rebalance_e (USD เทียบทุนของ Webull) · ข้อมูลไม่พอ → NaN ทั้งเส้น
+
+    rebalance_e = rebalance + Eₙ สะสมของ bot (ต้องมี chain เหมือน ③)
+    """
     S = np.asarray(grid, dtype=float)
     U0 = float(sum(leg.unrealized for leg in legs))
     stock = sum(leg.qty for leg in legs if leg.kind == "stock") * (S - spot)
@@ -501,10 +508,13 @@ def symbol_curves(legs: Sequence[Leg], spot: float, now: datetime, chain: LegoCh
     expiry = U0 + stock + _expiry_change(legs, S, now, r)
     if chain is None:
         rebalance = np.full_like(S, np.nan, dtype=float)
+        excess = np.nan
     else:
         F = _log_floor(chain.fix_c, chain.leaps_shares, S)
         rebalance = U0 + (F - _log_floor(chain.fix_c, chain.leaps_shares, spot)) + options_now
-    return pd.DataFrame({PRICE_COL: S, "t0": t0, "expiry": expiry, "rebalance": rebalance})
+        excess = chain.excess
+    return pd.DataFrame({PRICE_COL: S, "t0": t0, "expiry": expiry, "rebalance": rebalance,
+                         "rebalance_e": rebalance + excess})
 
 
 def book_curves(book: SymbolBook, now: datetime, grid: np.ndarray, r: float = RISK_FREE) -> pd.DataFrame:
@@ -618,6 +628,12 @@ def legs_frame(legs: Sequence[Leg]) -> pd.DataFrame:
 USD = "%{y:,.2f} USD"
 
 
+def _rgba(hex_color: str, alpha: float) -> str:
+    value = hex_color.lstrip("#")
+    r, g, b = (int(value[i:i + 2], 16) for i in (0, 2, 4))
+    return f"rgba({r},{g},{b},{alpha})"
+
+
 def _layout(tok: dict, *, height: int, x_title: str, y_title: str) -> dict:
     text = dict(color=tok["text_secondary"], family=FONT_FAMILY, size=12)
     return dict(
@@ -629,6 +645,7 @@ def _layout(tok: dict, *, height: int, x_title: str, y_title: str) -> dict:
         hoverlabel=dict(bgcolor=tok["tooltip"], bordercolor=tok["axis"],
                         font=dict(family=FONT_FAMILY, size=13, color=tok["text_primary"])),
         legend=dict(orientation="h", x=0, xanchor="left", y=1.02, yanchor="bottom",
+                    traceorder="normal",        # fill="tonexty" ทำให้ Plotly กลับลำดับ legend เอง
                     bgcolor="rgba(0,0,0,0)",
                     font=dict(family=FONT_FAMILY, size=13, color=tok["text_primary"])),
         xaxis=dict(title=dict(text=x_title, font=text), tickfont=text, automargin=True,
@@ -689,18 +706,24 @@ def payoff_figure(df: pd.DataFrame, *, x_col: str = PRICE_COL, x_title: str = "�
                   now_pl: float | None = None, strikes: Sequence[float] = (),
                   u_star: float | None = None, theme: str | None = None,
                   height: int = 460) -> go.Figure:
-    """มุมมองบัญชีจริง: เส้น ① ② ③ (เฉพาะที่เลือกและมีข้อมูล) + เส้นตั้ง S₀ / strike / u* + จุดคุ้มทุนของ ①"""
+    """มุมมองบัญชีจริง: เส้น ① ② ③ ④ (เฉพาะที่เลือกและมีข้อมูล) + เส้นตั้ง S₀ / strike / u* + จุดคุ้มทุนของ ①"""
     tok = theme_tokens(theme)
     fig = go.Figure()
     x = df[x_col].to_numpy(dtype=float)
+    # ④ = ③ + Eₙ: สีเดียวกับ ③ (ตัวตนเดียวกัน — สีที่ 4 ของ palette ไม่ผ่าน validator แบบทุกคู่)
+    # แยกด้วยเส้นจุด + label ปลายเส้น และระบายช่องระหว่าง ③ กับ ④ = Eₙ เมื่อวาด ③ ด้วย
+    green = tok["series"][2]
     styles = {"t0": dict(color=tok["series"][0], width=LINE["total"]),
               "expiry": dict(color=tok["series"][1], width=LINE["actual"], dash=REFERENCE_DASH),
-              "rebalance": dict(color=tok["series"][2], width=LINE["excess"])}
+              "rebalance": dict(color=green, width=LINE["excess"]),
+              "rebalance_e": dict(color=green, width=LINE["total"], dash="dot")}
     drawn = [k for k in LINE_KEYS if k in show and np.isfinite(df[k].to_numpy(dtype=float)).all()]
     x_fmt = "%{x:,.0f}%" if x_col == PCT_COL else "%{x:,.2f}"
     for key in drawn:
+        band = key == "rebalance_e" and "rebalance" in drawn       # trace ก่อนหน้าคือ ③ เสมอ
         fig.add_trace(go.Scatter(x=x, y=df[key], name=LINE_NAMES[key], mode="lines",
-                                 line=styles[key],
+                                 line=styles[key], fill="tonexty" if band else None,
+                                 fillcolor=_rgba(green, FILL_ALPHA["excess"]) if band else None,
                                  hovertemplate=f"{LINE_NAMES[key]}: {USD}<extra></extra>"))
     lo, hi = float(x.min()), float(x.max())
     for k in strikes:

@@ -859,6 +859,12 @@ def _payoff_real(books: list, combined: bool, now) -> list[str]:
                "และไม่นับ E ที่ได้เพิ่มจากการแกว่ง จึงเป็นค่าขั้นต่ำ · มีเงินสดพอซื้อขาลง · เกิน u* = FIX_C/L "
                "SELL เกินหุ้นจริง → PASS (ของจริงเป็นขั้น อาจเหลือหุ้นค้างเล็กน้อย) · "
                "เส้น ① อยู่เหนือ ③ ที่ปลายทั้งสองข้าง = ราคาวิ่งทางเดียวแพ้ถือเฉยๆ")
+    chains = [book.usable_chain for book in books]
+    if all(chains):
+        excess = sum(chain.excess for chain in chains)
+        st.caption(f"④ = ③ + Eₙ สะสมของ bot ({excess:+,.2f} USD) = E ที่เก็บจากความแกว่งแล้ว (model ledger "
+                   "ชุดเดียวกับแท็บ Live) ซึ่งไม่อยู่ใน unrealized ของ Webull · เส้นนี้รวม 2 ledger จึงห่างจาก ③ "
+                   "เท่ากับ Eₙ ทุกราคา (แถบสีระหว่าง ③ กับ ④)")
     return [f"ซ่อนเส้น {', '.join(hidden)} เพราะข้อมูลไม่พอ (เหตุผลด้านล่าง)"] if hidden else []
 
 
