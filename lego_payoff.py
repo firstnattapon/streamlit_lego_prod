@@ -623,9 +623,18 @@ def legs_frame(legs: Sequence[Leg]) -> pd.DataFrame:
     } for leg in legs])
 
 
-# ---------------------------------------------------------------- กราฟ
+# ---------------------------------------------------------------- กราฟ (Plotly)
+# hover การ์ดเดียวทุกเส้น (ค่านำ ชื่อตาม) · ปุ่มซูม ±10/25/50% รอบราคาตอนนี้ (แกน y ปรับตามช่วง) · range slider
+# · โซนกำไร/ขาดทุนจาง ๆ คู่ป้าย ▲/▼ (สี status ไม่ทำหน้าที่ลำพัง) · ป้ายจุดคุ้มทุน/P/L ตอนนี้ · title + subtitle
+# ในภาพ (ดาวน์โหลด PNG แล้วอ่านรู้เรื่อง) · ทุกอย่างทำงานในเบราว์เซอร์ ไม่ rerun Streamlit
 
 USD = "%{y:,.2f} USD"
+# d3 format ใน hover ห้ามขึ้นต้นด้วย "+": Plotly adjustFormat เติม "~" หน้า แล้ว d3 อ่านไม่ได้ → ทศนิยมเต็ม
+STATUS = {"good": "#0ca30c", "critical": "#d03b3b"}   # dataviz status palette (คู่กับ ▲/▼ + ข้อความเสมอ)
+ZONE_ALPHA = 0.045
+ZOOM_PRESETS = (10, 25, 50)                           # ±% รอบราคาตอนนี้
+ALL_LABEL = "ทั้งหมด"
+Y_PAD = 0.08
 
 
 def _rgba(hex_color: str, alpha: float) -> str:
@@ -634,29 +643,81 @@ def _rgba(hex_color: str, alpha: float) -> str:
     return f"rgba({r},{g},{b},{alpha})"
 
 
-def _layout(tok: dict, *, height: int, x_title: str, y_title: str) -> dict:
+def chart_config(filename: str = "payoff") -> dict:
+    """config ของ st.plotly_chart: ดาวน์โหลด PNG ชื่อไฟล์ตามตัว (2×) · ดับเบิลคลิก = กลับมุมมองเริ่มต้น"""
+    return {"displaylogo": False, "scrollZoom": False, "doubleClick": "reset",
+            "modeBarButtonsToRemove": ["lasso2d", "select2d", "autoScale2d"],
+            "toImageButtonOptions": {"format": "png", "scale": 2, "filename": filename}}
+
+
+def _y_range(x: np.ndarray, series: Sequence[np.ndarray], lo: float, hi: float) -> list[float]:
+    """ช่วงแกน y ที่พอดีกับค่าของทุกเส้นใน [lo, hi] (รวม 0 เสมอ) + ขอบ 8%"""
+    mask = (x >= lo) & (x <= hi)
+    values = [0.0]
+    for y in series:
+        y = np.asarray(y, dtype=float)[mask]
+        values += y[np.isfinite(y)].tolist()
+    y_lo, y_hi = min(values), max(values)
+    pad = (y_hi - y_lo) * Y_PAD or 1.0
+    return [y_lo - pad, y_hi + pad]
+
+
+def _zoom_menu(tok: dict, x: np.ndarray, series: Sequence[np.ndarray], center: float | None,
+               pct_axis: bool, full: tuple[list[float], list[float]]) -> list[dict]:
+    """ปุ่ม ±10/25/50% รอบราคาตอนนี้ + ทั้งหมด — แต่ละปุ่มตั้งทั้งแกน x และ y (y พอดีกับช่วงที่เห็น)"""
+    buttons = []
+    lo_x, hi_x = float(x.min()), float(x.max())
+    if center is not None:
+        for p in ZOOM_PRESETS:
+            lo, hi = (center - p, center + p) if pct_axis else (center * (1 - p / 100), center * (1 + p / 100))
+            lo, hi = max(lo, lo_x), min(hi, hi_x)
+            if hi - lo <= 0:
+                continue
+            buttons.append(dict(label=f"±{p}%", method="relayout",
+                                args=[{"xaxis.range": [lo, hi], "yaxis.range": _y_range(x, series, lo, hi)}]))
+    buttons.append(dict(label=ALL_LABEL, method="relayout",
+                        args=[{"xaxis.range": full[0], "yaxis.range": full[1]}]))
+    return [dict(type="buttons", direction="right", showactive=True, active=len(buttons) - 1,
+                 x=1.0, xanchor="right", y=1.02, yanchor="bottom",       # แถวเดียวกับ legend (legend ชิดซ้าย)
+                 pad=dict(t=0, r=0), bgcolor=tok["button"], bordercolor=tok["grid"], borderwidth=1,
+                 font=dict(family=FONT_FAMILY, size=12, color=tok["text_primary"]), buttons=buttons)]
+
+
+def _layout(tok: dict, *, height: int, x_title: str, y_title: str, title: str | None,
+            subtitle: str | None, hover_title: str, x_range: list[float], y_range: list[float]) -> dict:
     text = dict(color=tok["text_secondary"], family=FONT_FAMILY, size=12)
-    return dict(
+    layout = dict(
         height=height,
-        margin=dict(l=8, r=96, t=56, b=8),
+        margin=dict(l=8, r=96, t=118 if title else 72, b=8),
         paper_bgcolor=tok["surface"], plot_bgcolor=tok["surface"],
         font=dict(family=FONT_FAMILY, size=13, color=tok["text_secondary"]),
-        hovermode="x unified",
-        hoverlabel=dict(bgcolor=tok["tooltip"], bordercolor=tok["axis"],
+        hovermode="x unified", hoverdistance=-1,
+        hoverlabel=dict(bgcolor=tok["tooltip"], bordercolor=tok["grid"], namelength=-1, align="left",
                         font=dict(family=FONT_FAMILY, size=13, color=tok["text_primary"])),
         legend=dict(orientation="h", x=0, xanchor="left", y=1.02, yanchor="bottom",
                     traceorder="normal",        # fill="tonexty" ทำให้ Plotly กลับลำดับ legend เอง
+                    itemclick="toggle", itemdoubleclick="toggleothers", itemsizing="constant",
                     bgcolor="rgba(0,0,0,0)",
                     font=dict(family=FONT_FAMILY, size=13, color=tok["text_primary"])),
-        xaxis=dict(title=dict(text=x_title, font=text), tickfont=text, automargin=True,
+        xaxis=dict(title=dict(text=x_title, font=text), tickfont=text, automargin=True, range=x_range,
                    showgrid=False, zeroline=False, showline=True, linecolor=tok["axis"],
                    ticks="outside", tickcolor=tok["axis"], ticklen=4, hoverformat=",.2f",
                    showspikes=True, spikemode="across", spikesnap="cursor", spikethickness=1,
-                   spikedash="solid", spikecolor=tok["axis"]),
-        yaxis=dict(title=dict(text=y_title, font=text), tickfont=text, automargin=True,
-                   tickformat=",.2~f", showgrid=True, gridcolor=tok["grid"], zeroline=True,
-                   zerolinecolor=tok["zero"], zerolinewidth=1, showline=False, ticks=""),
+                   spikedash="solid", spikecolor=tok["axis"],
+                   unifiedhovertitle=dict(text=hover_title),
+                   rangeslider=dict(visible=True, thickness=0.07, bgcolor=tok["surface"], range=x_range,
+                                    bordercolor=tok["grid"], borderwidth=1)),
+        yaxis=dict(title=dict(text=y_title, font=text), tickfont=text, automargin=True, range=y_range,
+                   tickformat=",.0f", hoverformat=",.2f", showgrid=True, gridcolor=tok["grid"],
+                   zeroline=True, zerolinecolor=tok["zero"], zerolinewidth=1, showline=False, ticks=""),
     )
+    if title:
+        layout["title"] = dict(
+            text=f"<b>{title}</b>", x=0, xanchor="left", xref="paper", y=0.985, yanchor="top",
+            yref="container", font=dict(family=FONT_FAMILY, size=17, color=tok["text_primary"]),
+            subtitle=dict(text=subtitle or "", font=dict(family=FONT_FAMILY, size=12,
+                                                         color=tok["text_secondary"])))
+    return layout
 
 
 def _spread(values: Sequence[float], gap: float) -> list[float]:
@@ -693,6 +754,29 @@ def _vline(fig: go.Figure, x: float, tok: dict, text: str, *, dash: str, strong:
                   annotation_position="top right")
 
 
+def _chip(fig: go.Figure, tok: dict, x: float, y: float, text: str, *, ax: int, ay: int) -> None:
+    """ป้ายเล็กชี้จุด (P/L ตอนนี้ / คุ้มทุน) — สี text token บนพื้น tooltip"""
+    fig.add_annotation(x=x, y=y, text=text, showarrow=True, arrowhead=0, arrowwidth=1,
+                       arrowcolor=tok["axis"], ax=ax, ay=ay, bgcolor=tok["tooltip"],
+                       bordercolor=tok["grid"], borderwidth=1, borderpad=3,
+                       font=dict(family=FONT_FAMILY, size=12, color=tok["text_primary"]))
+
+
+def _zones(fig: go.Figure, tok: dict, y_range: list[float]) -> None:
+    """โซนกำไร (y > 0) / ขาดทุน (y < 0) จาง ๆ + ป้าย ▲ กำไร / ▼ ขาดทุน ชิดเส้น 0 ด้านซ้าย"""
+    lo, hi = y_range
+    if hi > 0:
+        fig.add_hrect(y0=0, y1=hi, fillcolor=_rgba(STATUS["good"], ZONE_ALPHA), line_width=0, layer="below")
+        fig.add_annotation(xref="paper", x=0.005, y=0, yanchor="bottom", xanchor="left", yshift=2,
+                           text="▲ กำไร", showarrow=False,
+                           font=dict(family=FONT_FAMILY, size=11, color=tok["text_secondary"]))
+    if lo < 0:
+        fig.add_hrect(y0=lo, y1=0, fillcolor=_rgba(STATUS["critical"], ZONE_ALPHA), line_width=0, layer="below")
+        fig.add_annotation(xref="paper", x=0.005, y=0, yanchor="top", xanchor="left", yshift=-2,
+                           text="▼ ขาดทุน", showarrow=False,
+                           font=dict(family=FONT_FAMILY, size=11, color=tok["text_secondary"]))
+
+
 def _finite_span(df: pd.DataFrame, keys: Sequence[str]) -> tuple[float, float]:
     values = np.concatenate([df[k].to_numpy(dtype=float) for k in keys]) if keys else np.array([0.0])
     values = values[np.isfinite(values)]
@@ -705,11 +789,13 @@ def payoff_figure(df: pd.DataFrame, *, x_col: str = PRICE_COL, x_title: str = "�
                   show: Sequence[str] = LINE_KEYS, spot: float | None = None,
                   now_pl: float | None = None, strikes: Sequence[float] = (),
                   u_star: float | None = None, theme: str | None = None,
-                  height: int = 460) -> go.Figure:
+                  title: str | None = None, subtitle: str | None = None,
+                  height: int = 580) -> go.Figure:
     """มุมมองบัญชีจริง: เส้น ① ② ③ ④ (เฉพาะที่เลือกและมีข้อมูล) + เส้นตั้ง S₀ / strike / u* + จุดคุ้มทุนของ ①"""
     tok = theme_tokens(theme)
     fig = go.Figure()
     x = df[x_col].to_numpy(dtype=float)
+    pct_axis = x_col == PCT_COL
     # ④ = ③ + Eₙ: สีเดียวกับ ③ (ตัวตนเดียวกัน — สีที่ 4 ของ palette ไม่ผ่าน validator แบบทุกคู่)
     # แยกด้วยเส้นจุด + label ปลายเส้น และระบายช่องระหว่าง ③ กับ ④ = Eₙ เมื่อวาด ③ ด้วย
     green = tok["series"][2]
@@ -718,35 +804,52 @@ def payoff_figure(df: pd.DataFrame, *, x_col: str = PRICE_COL, x_title: str = "�
               "rebalance": dict(color=green, width=LINE["excess"]),
               "rebalance_e": dict(color=green, width=LINE["total"], dash="dot")}
     drawn = [k for k in LINE_KEYS if k in show and np.isfinite(df[k].to_numpy(dtype=float)).all()]
-    x_fmt = "%{x:,.0f}%" if x_col == PCT_COL else "%{x:,.2f}"
+    x_fmt = "%{x:,.0f}%" if pct_axis else "%{x:,.2f}"
+    if spot and drawn and not pct_axis:          # แถวแรกของ hover: ห่างจากราคาตอนนี้กี่ %
+        fig.add_trace(go.Scatter(
+            x=x, y=df[drawn[0]], name="Δ จาก S₀", mode="lines", showlegend=False,
+            line=dict(color="rgba(0,0,0,0)", width=0), customdata=(x / spot - 1.0) * 100.0,
+            hovertemplate="ห่างจากราคาตอนนี้ <b>%{customdata:.1f}%</b><extra></extra>"))
     for key in drawn:
         band = key == "rebalance_e" and "rebalance" in drawn       # trace ก่อนหน้าคือ ③ เสมอ
         fig.add_trace(go.Scatter(x=x, y=df[key], name=LINE_NAMES[key], mode="lines",
                                  line=styles[key], fill="tonexty" if band else None,
                                  fillcolor=_rgba(green, FILL_ALPHA["excess"]) if band else None,
-                                 hovertemplate=f"{LINE_NAMES[key]}: {USD}<extra></extra>"))
+                                 hovertemplate=f"<b>%{{y:,.2f}}</b> USD  {LINE_NAMES[key]}<extra></extra>"))
     lo, hi = float(x.min()), float(x.max())
+    full_y = _y_range(x, [df[k].to_numpy(dtype=float) for k in drawn], lo, hi)
+    _zones(fig, tok, full_y)
     for k in strikes:
         if lo <= k <= hi:
             _vline(fig, k, tok, f"K {k:g}", dash="dot")
     if u_star is not None and math.isfinite(u_star) and lo <= u_star <= hi:
         _vline(fig, u_star, tok, f"u* {u_star:,.2f}", dash="dash")
     if spot is not None:
-        label = "ตอนนี้" if x_col == PCT_COL else f"ตอนนี้ {spot:,.2f}"
-        _vline(fig, spot, tok, label, dash="solid", strong=True)
+        _vline(fig, spot, tok, "ตอนนี้" if pct_axis else f"ตอนนี้ {spot:,.2f}", dash="solid", strong=True)
         if now_pl is not None:
             fig.add_trace(go.Scatter(
                 x=[spot], y=[now_pl], name="P/L ตอนนี้", mode="markers", showlegend=False,
-                marker=dict(size=9, color=tok["text_primary"], line=dict(color=tok["surface"], width=2)),
-                hovertemplate=f"P/L ตอนนี้: {USD}<extra></extra>"))
+                marker=dict(size=10, color=tok["text_primary"], line=dict(color=tok["surface"], width=2)),
+                hovertemplate="<b>%{y:,.2f}</b> USD  P/L ตอนนี้<extra></extra>"))
+            _chip(fig, tok, spot, now_pl, f"ตอนนี้ <b>{now_pl:+,.2f}</b>", ax=-56, ay=36)
     if "t0" in drawn:
         points = break_evens(x, df["t0"])
         if points:
             fig.add_trace(go.Scatter(
                 x=points, y=[0.0] * len(points), name="คุ้มทุน ①", mode="markers", showlegend=False,
-                marker=dict(size=9, color=tok["surface"], line=dict(color=tok["series"][0], width=2)),
-                hovertemplate=f"คุ้มทุน ① ที่ {x_fmt}<extra></extra>"))
-    fig.update_layout(**_layout(tok, height=height, x_title=x_title, y_title="P/L เทียบทุน (USD)"))
+                marker=dict(size=10, color=tok["surface"], line=dict(color=tok["series"][0], width=2)),
+                hovertemplate=f"คุ้มทุน ① ที่ <b>{x_fmt}</b><extra></extra>"))
+            for point in points:
+                label = f"{point:,.0f}%" if pct_axis else f"{point:,.2f}"
+                _chip(fig, tok, point, 0.0, f"คุ้มทุน ① <b>{label}</b>", ax=40, ay=-34)
+    hover_title = ("ทุกตัวที่ <b>%{x:.0f}%</b> ของราคาตอนนี้" if pct_axis
+                   else "ราคา <b>%{x:,.2f}</b> USD")
+    fig.update_layout(**_layout(tok, height=height, x_title=x_title, y_title="P/L เทียบทุน (USD)",
+                                title=title, subtitle=subtitle, hover_title=hover_title,
+                                x_range=[lo, hi], y_range=full_y))
+    fig.update_layout(updatemenus=_zoom_menu(
+        tok, x, [df[k].to_numpy(dtype=float) for k in drawn], 100.0 if pct_axis else spot, pct_axis,
+        ([lo, hi], full_y)))
     _end_labels(fig, tok, hi, [(LINE_SHORT[k], float(df[k].iloc[-1])) for k in drawn],
                 _finite_span(df, drawn))
     return fig
@@ -754,26 +857,40 @@ def payoff_figure(df: pd.DataFrame, *, x_col: str = PRICE_COL, x_title: str = "�
 
 def lego_ledger_figure(df: pd.DataFrame, *, x_col: str = PRICE_COL, x_title: str = "ราคาหุ้น (USD)",
                        p_acted: float | None = None, u_star: float | None = None,
-                       theme: str | None = None, height: int = 420) -> go.Figure:
-    """มุมมอง LEGO model ledger: R(S) (เส้นประอ้างอิง สีเดียวกับ Rₙ ของแท็บ Live) + พื้น A(S) (สีเดียวกับ Aₙ)"""
+                       spot: float | None = None, theme: str | None = None,
+                       title: str | None = None, subtitle: str | None = None,
+                       height: int = 540) -> go.Figure:
+    """มุมมอง LEGO model ledger: R(S) (เส้นประอ้างอิง สีเดียวกับ Rₙ ของแท็บ Live) + พื้น A(S) (สีเดียวกับ Aₙ)
+
+    ไม่มีโซนกำไร/ขาดทุน เพราะ model ledger ไม่ใช่ P/L ของบัญชี
+    """
     tok = theme_tokens(theme)
     fig = go.Figure()
     x = df[x_col].to_numpy(dtype=float)
+    pct_axis = x_col == PCT_COL
     fig.add_trace(go.Scatter(
         x=x, y=df["R"], name=LEGO_NAMES["R"], mode="lines",
         line=dict(color=tok["text_secondary"], width=LINE["reference"], dash=REFERENCE_DASH),
-        hovertemplate=f"{LEGO_NAMES['R']}: {USD}<extra></extra>"))
+        hovertemplate=f"<b>%{{y:,.2f}}</b> USD  {LEGO_NAMES['R']}<extra></extra>"))
     fig.add_trace(go.Scatter(
         x=x, y=df["A_floor"], name=LEGO_NAMES["A"], mode="lines",
         line=dict(color=tok["series"][0], width=LINE["actual"]),
-        customdata=df["gap"], hovertemplate=f"{LEGO_NAMES['A']}: {USD}"
-                                            "<br>A − R(S): %{customdata:,.2f} USD<extra></extra>"))
+        customdata=df["gap"], hovertemplate=f"<b>%{{y:,.2f}}</b> USD  {LEGO_NAMES['A']}"
+                                            "<br><b>%{customdata:,.2f}</b> USD  A − R(S)<extra></extra>"))
     lo, hi = float(x.min()), float(x.max())
+    series = [df["R"].to_numpy(dtype=float), df["A_floor"].to_numpy(dtype=float)]
+    full_y = _y_range(x, series, lo, hi)
     if u_star is not None and math.isfinite(u_star) and lo <= u_star <= hi:
         _vline(fig, u_star, tok, f"u* {u_star:,.2f}", dash="dash")
     if p_acted is not None and lo <= p_acted <= hi:
         _vline(fig, p_acted, tok, f"P_acted {p_acted:,.2f}", dash="solid", strong=True)
-    fig.update_layout(**_layout(tok, height=height, x_title=x_title, y_title="USD (model ledger)"))
+    hover_title = ("ทุกตัวที่ <b>%{x:.0f}%</b> ของราคาตอนนี้" if pct_axis
+                   else "ราคา <b>%{x:,.2f}</b> USD")
+    fig.update_layout(**_layout(tok, height=height, x_title=x_title, y_title="USD (model ledger)",
+                                title=title, subtitle=subtitle, hover_title=hover_title,
+                                x_range=[lo, hi], y_range=full_y))
+    center = 100.0 if pct_axis else (spot if spot is not None else p_acted)
+    fig.update_layout(updatemenus=_zoom_menu(tok, x, series, center, pct_axis, ([lo, hi], full_y)))
     _end_labels(fig, tok, hi, [("R", float(df["R"].iloc[-1])), ("A", float(df["A_floor"].iloc[-1]))],
                 _finite_span(df, ["R", "A_floor"]))
     return fig

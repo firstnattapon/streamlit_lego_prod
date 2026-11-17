@@ -723,6 +723,9 @@ PAYOFF_TTL_S, PAYOFF_COOLDOWN_S = 300, 30      # ไม่แย่ง rate limi
 PAYOFF_ALL = "รวมพอร์ต"
 PAYOFF_VIEW_REAL, PAYOFF_VIEW_LEGO = "💵 บัญชีจริง (Webull)", "🧬 LEGO model ledger"
 PAYOFF_RANGE_DEFAULT = (40, 200)
+PAYOFF_CHART_HINT = ("ชี้เมาส์ = ค่าทุกเส้นที่ราคานั้น · ปุ่ม ±10/25/50% มุมขวาบน = ซูมรอบราคาตอนนี้ · "
+                     "ลากแถบใต้กราฟ = เลื่อนดูช่วงราคา · คลิกชื่อเส้น = ซ่อน/โชว์ (ดับเบิลคลิก = ดูเส้นเดียว) · "
+                     "ดับเบิลคลิกกราฟ = กลับมุมมองเริ่มต้น · 📷 แถบเครื่องมือ = ดาวน์โหลด PNG")
 _RUN_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 
 
@@ -801,8 +804,13 @@ def _payoff_range() -> tuple[int, int]:
     return lo, hi
 
 
+def _payoff_stamp(now) -> str:
+    return pd.Timestamp(now).tz_convert("UTC").strftime("%Y-%m-%d %H:%M UTC")
+
+
 def _payoff_real(books: list, combined: bool, now) -> list[str]:
     """มุมมองบัญชีจริง (P/L เทียบทุนของ Webull) — คืนหมายเหตุของเส้นที่ซ่อน"""
+    stamp = _payoff_stamp(now)
     names = list(payoff.LINE_NAMES.values())
     current = st.session_state.get("payoff_lines")
     if not isinstance(current, list) or not set(current) <= set(names):
@@ -820,8 +828,10 @@ def _payoff_real(books: list, combined: bool, now) -> list[str]:
         cards[2].metric("FIX_C รวม (bot)", fmt_num(sum(b.usable_chain.fix_c for b in books
                                                       if b.usable_chain) or None))
         fig = payoff.payoff_figure(df, x_col=payoff.PCT_COL, show=show, spot=100.0, now_pl=now_pl,
-                                   x_title="% ของราคาปัจจุบัน (สมมติทุกตัวขยับ % เท่ากัน)", theme=theme)
-        x_col, at = payoff.PCT_COL, payoff.TABLE_PCTS
+                                   x_title="% ของราคาปัจจุบัน (สมมติทุกตัวขยับ % เท่ากัน)", theme=theme,
+                                   title="รวมพอร์ต · Payoff ณ ตอนนี้",
+                                   subtitle=f"{len(books)} ตัว · P/L ตอนนี้ {now_pl:+,.2f} USD · {stamp}")
+        x_col, at, filename = payoff.PCT_COL, payoff.TABLE_PCTS, "payoff_portfolio"
     else:
         book = books[0]
         if book.spot is None:
@@ -845,9 +855,14 @@ def _payoff_real(books: list, combined: bool, now) -> list[str]:
         cards[5].metric("exposure จริง", "—" if exposure is None else f"{exposure:.1%}",
                         help="(หุ้นจริง + Σ delta × 100 × สัญญา) × S₀ ÷ FIX_C — bot นับ LEAPS เป็นหุ้นเต็ม (delta 1)")
         fig = payoff.payoff_figure(df, show=show, spot=book.spot, now_pl=book.unrealized,
-                                   strikes=strikes, u_star=chain.u_star if chain else None, theme=theme)
+                                   strikes=strikes, u_star=chain.u_star if chain else None, theme=theme,
+                                   title=f"{book.symbol} · Payoff ณ ตอนนี้",
+                                   subtitle=f"S₀ {book.spot:,.2f} USD · P/L ตอนนี้ {book.unrealized:+,.2f} USD · "
+                                            f"{leaps} · {stamp}")
         x_col, at = payoff.PRICE_COL, [book.spot * pct / 100 for pct in payoff.TABLE_PCTS]
-    st.plotly_chart(fig, theme=None, config=PLOTLY_CONFIG, key="payoff_chart")
+        filename = f"payoff_{book.symbol}"
+    st.plotly_chart(fig, theme=None, config=payoff.chart_config(filename), key="payoff_chart")
+    st.caption(PAYOFF_CHART_HINT)
     hidden = [payoff.LINE_SHORT[k] for k in show if not df[k].notna().all()]
     with st.expander("ตารางค่า"):
         st.dataframe(payoff.curve_table(df, x_col, {k: payoff.LINE_NAMES[k] for k in payoff.LINE_KEYS}, at),
@@ -868,8 +883,9 @@ def _payoff_real(books: list, combined: bool, now) -> list[str]:
     return [f"ซ่อนเส้น {', '.join(hidden)} เพราะข้อมูลไม่พอ (เหตุผลด้านล่าง)"] if hidden else []
 
 
-def _payoff_lego(books: list, combined: bool) -> None:
+def _payoff_lego(books: list, combined: bool, now) -> None:
     """มุมมอง LEGO model ledger — ตัวเลขชุดเดียวกับแท็บ Live ห้ามปนกับ P/L ของ Webull"""
+    stamp = _payoff_stamp(now)
     lo, hi = _payoff_range()
     theme = _streamlit_theme()
     if combined:
@@ -883,8 +899,11 @@ def _payoff_lego(books: list, combined: bool) -> None:
         cards[1].metric("Σ R_basis", f"{sum(c.r_basis for c in usable):+,.2f}")
         cards[2].metric("Σ Eₙ", f"{sum(c.excess for c in usable):+,.2f}")
         fig = payoff.lego_ledger_figure(df, x_col=payoff.PCT_COL, theme=theme,
-                                        x_title="% ของราคาปัจจุบัน (สมมติทุกตัวขยับ % เท่ากัน)")
-        x_col, at = payoff.PCT_COL, payoff.TABLE_PCTS
+                                        x_title="% ของราคาปัจจุบัน (สมมติทุกตัวขยับ % เท่ากัน)",
+                                        title="รวมพอร์ต · LEGO model ledger",
+                                        subtitle=f"{len(usable)} chain · Σ Eₙ "
+                                                 f"{sum(c.excess for c in usable):+,.2f} USD · {stamp}")
+        x_col, at, filename = payoff.PCT_COL, payoff.TABLE_PCTS, "lego_ledger_portfolio"
     else:
         book = books[0]
         chain = book.usable_chain
@@ -899,9 +918,14 @@ def _payoff_lego(books: list, combined: bool) -> None:
         cards[2].metric("Aₙ สะสม", f"{chain.actual:+,.2f}")
         cards[3].metric("R_basis", f"{chain.r_basis:+,.2f}")
         cards[4].metric("Eₙ สะสม", f"{chain.excess:+,.2f}")
-        fig = payoff.lego_ledger_figure(df, p_acted=chain.p_acted, u_star=chain.u_star, theme=theme)
+        fig = payoff.lego_ledger_figure(df, p_acted=chain.p_acted, u_star=chain.u_star, spot=book.spot,
+                                        theme=theme, title=f"{book.symbol} · LEGO model ledger",
+                                        subtitle=f"P_acted {chain.p_acted:,.2f} · Aₙ {chain.actual:+,.2f} · "
+                                                 f"Eₙ {chain.excess:+,.2f} USD · {stamp}")
         x_col, at = payoff.PRICE_COL, [book.spot * pct / 100 for pct in payoff.TABLE_PCTS]
-    st.plotly_chart(fig, theme=None, config=PLOTLY_CONFIG, key="payoff_lego_chart")
+        filename = f"lego_ledger_{book.symbol}"
+    st.plotly_chart(fig, theme=None, config=payoff.chart_config(filename), key="payoff_lego_chart")
+    st.caption(PAYOFF_CHART_HINT)
     with st.expander("ตารางค่า"):
         st.dataframe(payoff.curve_table(df, x_col, {"R": payoff.LEGO_NAMES["R"],
                                                     "A_floor": payoff.LEGO_NAMES["A"],
@@ -937,7 +961,7 @@ def _render_payoff(snap: dict, chains: dict, chain_issues: dict, now) -> None:
     if view == PAYOFF_VIEW_REAL:
         notes += _payoff_real(picked, combined, now)
     else:
-        _payoff_lego(picked, combined)
+        _payoff_lego(picked, combined, now)
     notes += [n for book in picked for n in (*book.notes, book.chain_issue)]
     _payoff_notes(notes)
 

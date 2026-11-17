@@ -353,7 +353,62 @@ def test_payoff_figure_draws_only_finite_selected_lines():
     assert {payoff.LINE_NAMES["t0"], payoff.LINE_NAMES["expiry"], "P/L ตอนนี้"} <= set(names)
     assert fig.layout.paper_bgcolor == payoff.theme_tokens("dark")["surface"]
     only_t0 = payoff.payoff_figure(df, show=["t0"], theme="light")
-    assert [t.name for t in only_t0.data if t.mode == "lines"] == [payoff.LINE_NAMES["t0"]]
+    assert [t.name for t in only_t0.data if t.mode == "lines" and t.showlegend is not False] == \
+        [payoff.LINE_NAMES["t0"]]
+
+
+def _texts(fig) -> list[str]:
+    return [a.text for a in fig.layout.annotations]
+
+
+def test_payoff_figure_is_interactive_and_self_explaining():
+    c = chain()
+    df = payoff.symbol_curves(legs(), 9.0, NOW, c, payoff.price_grid(9.0, 40, 200, extra=[7.0, 15.0]))
+    fig = payoff.payoff_figure(df, spot=9.0, now_pl=-220.0, strikes=[7.0], u_star=15.0, theme="light",
+                               title="AAA · Payoff ณ ตอนนี้", subtitle="S₀ 9.00 USD")
+    layout = fig.layout
+    # หัวการ์ด hover + แถว "ห่างจากราคาตอนนี้" (ไม่อยู่ใน legend) + ค่านำหน้าชื่อเส้น
+    assert layout.hovermode == "x unified" and "ราคา" in layout.xaxis.unifiedhovertitle.text
+    helper = fig.data[0]
+    assert helper.showlegend is False and "ห่างจากราคาตอนนี้" in helper.hovertemplate
+    assert helper.customdata[list(helper.x).index(9.0)] == pytest.approx(0.0)
+    assert fig.data[1].hovertemplate.startswith("<b>%{y:,.2f}</b> USD  ①")
+    # ปุ่มซูม: ±10/25/50% รอบ S₀ ตั้งทั้งแกน x และ y · y พอดีกับค่าที่เห็นในช่วงนั้น
+    menu = layout.updatemenus[0]
+    assert [b.label for b in menu.buttons] == ["±10%", "±25%", "±50%", "ทั้งหมด"]
+    ten = menu.buttons[0].args[0]
+    assert ten["xaxis.range"] == pytest.approx([8.1, 9.9])
+    window = (df["price"] >= 8.1) & (df["price"] <= 9.9)
+    visible = df.loc[window, list(payoff.LINE_KEYS)].to_numpy()
+    assert ten["yaxis.range"][0] < visible.min() and ten["yaxis.range"][1] > max(0.0, visible.max())
+    assert menu.buttons[-1].args[0]["xaxis.range"] == list(layout.xaxis.range)
+    assert layout.xaxis.rangeslider.visible is True and list(layout.xaxis.rangeslider.range) == list(layout.xaxis.range)
+    templates = [t.hovertemplate for t in fig.data] + [layout.yaxis.hoverformat]
+    assert not any(":+" in (t or "") or (t or "").startswith("+") for t in templates)   # d3 + Plotly: ห้าม "+"
+    # โซนกำไร/ขาดทุน (สี status) คู่ป้าย ▲/▼ · ป้ายจุดคุ้มทุนและ P/L ตอนนี้ · title/subtitle ในภาพ
+    fills = {shape.fillcolor for shape in layout.shapes if shape.type == "rect"}
+    assert fills == {payoff._rgba(payoff.STATUS["good"], payoff.ZONE_ALPHA),
+                     payoff._rgba(payoff.STATUS["critical"], payoff.ZONE_ALPHA)}
+    texts = _texts(fig)
+    assert "▲ กำไร" in texts and "▼ ขาดทุน" in texts
+    assert any(t.startswith("คุ้มทุน ①") for t in texts) and "ตอนนี้ <b>-220.00</b>" in texts
+    assert layout.title.text == "<b>AAA · Payoff ณ ตอนนี้</b>" and layout.title.subtitle.text == "S₀ 9.00 USD"
+
+
+def test_portfolio_figure_zooms_in_percent_points():
+    chains, issues = payoff.lego_chains(STATE, ROWS)
+    books, _ = payoff.build_books({"positions": POSITIONS, "options": OPTION_QUOTES}, chains, issues, NOW)
+    df = payoff.portfolio_curves(books, payoff.pct_grid(40, 200), NOW)
+    fig = payoff.payoff_figure(df, x_col=payoff.PCT_COL, spot=100.0, now_pl=-220.0)
+    assert fig.layout.updatemenus[0].buttons[1].args[0]["xaxis.range"] == pytest.approx([75.0, 125.0])
+    assert not any(t.name == "Δ จาก S₀" for t in fig.data)          # แกนเป็น % อยู่แล้ว
+    assert "%" in fig.layout.xaxis.unifiedhovertitle.text
+
+
+def test_chart_config_names_the_png_and_resets_on_double_click():
+    config = payoff.chart_config("payoff_AAA")
+    assert config["toImageButtonOptions"] == {"format": "png", "scale": 2, "filename": "payoff_AAA"}
+    assert config["doubleClick"] == "reset" and config["displaylogo"] is False
 
 
 def test_line_four_is_line_three_plus_excess_with_the_band_between():
@@ -374,8 +429,10 @@ def test_line_four_is_line_three_plus_excess_with_the_band_between():
 def test_lego_figure_has_r_and_a():
     c = chain()
     fig = payoff.lego_ledger_figure(payoff.lego_view_curves(c, payoff.price_grid(9.0)),
-                                    p_acted=c.p_acted, u_star=c.u_star)
+                                    p_acted=c.p_acted, u_star=c.u_star, spot=9.5)
     assert [t.name for t in fig.data] == [payoff.LEGO_NAMES["R"], payoff.LEGO_NAMES["A"]]
+    assert not [shape for shape in fig.layout.shapes if shape.type == "rect"]   # model ledger ≠ P/L: ไม่มีโซน
+    assert fig.layout.updatemenus[0].buttons[0].args[0]["xaxis.range"] == pytest.approx([8.55, 10.45])
 
 
 # ---------------------------------------------------------------- Webull อ่านอย่างเดียว (HTTP ปลอม)
