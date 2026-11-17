@@ -59,7 +59,7 @@ FIREBASE_DB_URL_PAPER = "https://lego-firebase-paper.asia-southeast1.firebasedat
 
 ## ไฟล์หลัก
 
-- `streamlit_app.py` — หน้า Live Dashboard, Rebalancing 101, Web Apps และ Cheat Sheet
+- `streamlit_app.py` — หน้า Live Dashboard, Rebalancing 101, Web Apps, Payoff และ Cheat Sheet
 - `web_apps/` — คู่มือ/playground แบบ HTML ล้วน แสดงใน iframe ผ่าน `components.html`
   (รายละเอียดด้านล่าง)
 - `cheat_sheet/` — แผนภาพ Mermaid `.mmd` + ภาพ PNG ที่ render ไว้ + `summary.md` (สรุป 10 ข้อ + ประโยคเดียว) ·
@@ -70,6 +70,10 @@ FIREBASE_DB_URL_PAPER = "https://lego-firebase-paper.asia-southeast1.firebasedat
 - `lego_hover_table.py` — ตาราง HTML ที่ชี้เมาส์ดูที่มาของตัวเลขได้ (ฝังด้วย `components.html`)
 - `lego_charts.py` — กราฟ Plotly ทั้งหมด (pure ไม่ import streamlit จึง test ได้ตรง ๆ — `test_charts.py`)
 - `dna_engine.py` — ตัวถอด DNA แบบเดียวกับ backend
+- `lego_payoff.py` — สูตรและกราฟของแท็บ Payoff: Black-Scholes, เส้น ① ② ③, มุมมอง LEGO model ledger
+  (pure ไม่ import streamlit / Webull SDK — `test_payoff.py`)
+- `lego_webull_read.py` — อ่าน position + quote จาก Webull OpenAPI **อ่านอย่างเดียว** (GET 4 path, ไม่ส่ง order,
+  ไม่สร้าง token, ไม่เขียนไฟล์ — พิสูจน์ใน `test_payoff.py`)
 - `requirements.txt` — dependency ที่ pin แล้ว
 - `docs/` — คู่มือและแผนการเรียนรู้เพิ่มเติม
 
@@ -119,6 +123,76 @@ python tools/render_cheat_sheet.py
 เพิ่มคู่มือใหม่: วางไฟล์ HTML ใน `web_apps/` แล้วเพิ่มชื่อใน `WEB_APPS` (ตัวเลือกในแท็บ
 Web Apps) — `test_web_apps.py` จะตรวจให้อัตโนมัติว่าทุกหน้าใน `web_apps/` อยู่ในรายการ
 และยัง self-contained
+
+## แท็บ Payoff
+
+เส้น payoff ของ position จริงในบัญชี Webull ณ ตอนนี้ (หุ้นจริง + LEAPS) ตัวเลขด้านล่างเป็นตัวอย่างสมมติ
+
+```
+📐 Payoff · บัญชีจริง (Webull)   ดึงเมื่อ 2026-01-02 15:00 UTC · ตลาด: TRADING · 1 บัญชี      [⟳ รีเฟรช]
+ตัว: [ AAA | BBB | รวมพอร์ต ]          มุมมอง: [ 💵 บัญชีจริง (Webull) | 🧬 LEGO model ledger ]
+เส้น: (① T+0 วันนี้) (② ณ หมดอายุ LEAPS) (③ bot rebalance ต่อ) (④ ③ + Eₙ)   ช่วงราคา 40% – 200% ของ S₀
+S₀ 9.00 │ P/L ตอนนี้ −220.00 │ หุ้นจริง 60.00 │ Option 1×C7 │ FIX_C (bot) 1500.00 │ exposure จริง 84.0%
+[ กราฟ: เส้นตั้งที่ S₀ · จุด P/L ตอนนี้ · K · u* · จุดคุ้มทุนของ ① ]   ▸ ตารางค่า
+```
+
+**ใช้กราฟ** (Plotly ทำงานในเบราว์เซอร์ ไม่โหลดข้อมูลซ้ำ): ชี้เมาส์ = การ์ดค่าทุกเส้นที่ราคานั้น (หัวการ์ดเป็นราคา + แถว
+"ห่างจากราคาตอนนี้ %") · ปุ่ม **±10% / ±25% / ±50% / ทั้งหมด** มุมขวาบน = ซูมรอบราคาตอนนี้ (แกน y ปรับให้พอดีช่วง) ·
+ลากแถบใต้กราฟ = เลื่อนช่วงราคา · คลิกชื่อเส้น = ซ่อน/โชว์ (ดับเบิลคลิก = ดูเส้นเดียว) · ดับเบิลคลิกกราฟ = กลับมุมมองเริ่มต้น ·
+📷 = ดาวน์โหลด PNG ชื่อไฟล์ตามตัว (มีชื่อกราฟ + ราคา/เวลาในภาพ) · โซนกำไร/ขาดทุนระบายจาง ๆ พร้อมป้าย ▲/▼
+
+**มุมมอง 💵 บัญชีจริง** (แกน y = P/L เทียบทุนของ Webull · S₀ = `last_price` ของหุ้น · U₀ = Σ unrealized ทุกขา)
+
+| เส้น | สูตร |
+| --- | --- |
+| ① T+0 วันนี้ | U₀ + q·(S−S₀) + Σ option m·n·[BS(S) − BS(S₀)] — ผ่านจุด (S₀, U₀) |
+| ② ณ หมดอายุ LEAPS | U₀ + q·(S−S₀) + Σ option m·n·[V(S) − mark] ณ วันหมดอายุใกล้สุด (ตัวที่หมดทีหลังใช้ BS) |
+| ③ bot rebalance ต่อ | U₀ + F(S) − F(S₀) + Σ option m·n·[BS(S) − BS(S₀)] · F(u) = FIX_C·ln(u′) − L·u′, u′ = min(u, u*), u* = FIX_C/L |
+| ④ ③ + Eₙ | ③ + Eₙ สะสมของ bot (E ที่เก็บจากความแกว่งแล้ว ไม่อยู่ใน unrealized ของ Webull) — สีเดียวกับ ③ เป็นเส้นจุด แถบระหว่าง ③ กับ ④ = Eₙ |
+
+- ③ = ΔRₙ ของ LEGO ถ้า LEAPS เป็นหุ้นจริง + ส่วนต่างระหว่าง LEAPS จริงกับหุ้น L ตัว · เกิน u* SELL เกินหุ้นจริง → PASS
+  · rebalance ต่อเนื่อง ไม่จำลอง DNA gate/DIFF และไม่นับ E ที่ได้เพิ่มจากการแกว่ง จึงเป็นค่าขั้นต่ำ
+- Black-Scholes ใช้ r = 4% และ IV จาก Webull (ไม่มี → แก้ IV จาก mark ของ positions)
+- **exposure จริง** = (หุ้นจริง + Σ delta·100·สัญญา)·S₀ ÷ FIX_C — bot นับ LEAPS เป็นหุ้นเต็ม (delta 1) จึงเห็นราว 100%
+
+**มุมมอง 🧬 LEGO model ledger** ตัวเลขชุดเดียวกับแท็บ Live (semantics `execution_terminal_funding_v3`: Eₙ = Aₙ − R_basis)
+ไม่ใช่กำไรจริงในบัญชี และไม่ถูกบวกรวมกับ P/L ของ Webull (ยกเว้นเส้น ④ ที่ระบุชื่อไว้ชัดว่าเป็น ③ + Eₙ):
+R(S) = R_basis + FIX_C·ln(S/P_acted) · พื้น A(S) = Aₙ + FIX_C·ln(min(S,u*)/P_acted) — ที่ P_acted ได้ Aₙ และ R_basis ตรงกับ state
+
+**Fail closed**: ไม่มี state ของ bot (ไม่มี Firebase / ไม่มี chain), Webull กับ bot เห็นหุ้นจริงหรือ LEAPS ไม่ตรงกัน
+(ต่างเกิน 0.01 หุ้น) หรือแก้ IV ไม่ได้ → ซ่อนเส้นที่ต้องใช้ข้อมูลนั้น (③ ④ ต้องใช้ state ของ bot) และบอกเหตุผลใต้กราฟ ไม่ประมาณค่าแทน
+
+### ตั้งค่า (Streamlit secrets)
+
+```toml
+WEBULL_APP_KEY = "…"
+WEBULL_APP_SECRET = "…"
+WEBULL_REGION_ID = "th"
+WEBULL_ENVIRONMENT = "prod"
+WEBULL_TOKEN_TXT = """
+<token>
+<expires (ms)>
+<status>
+"""
+```
+
+- `WEBULL_TOKEN_TXT` = เนื้อหา `token.txt` ล่าสุดของ bot (ใช้แค่บรรทัดแรกเป็น header `x-access-token`)
+  ถ้าแท็บขึ้น "token ใช้ไม่ได้" ให้คัดลอก token.txt ล่าสุดมาใส่แล้วกด ⟳ รีเฟรช
+- เส้น ③ ④ และมุมมอง LEGO ใช้ `FIREBASE_SA_JSON` + `FIREBASE_DB_URL` ของ PROD ชุดเดิม
+  (อ่าน `webull_lego_state` 1 node + แถวล่าสุด 1 แถวต่อ chain) ไม่ขึ้นกับตัวเลือก PROD/PAPER ใน sidebar
+- ข้อมูลเก็บไว้ 5 นาที (ปุ่มรีเฟรชกดซ้ำได้ทุก 30 วินาที) เพื่อไม่แย่ง rate limit กับ bot
+
+### อ่านอย่างเดียว (ตรวจจากซอร์ส SDK 3.0.4)
+
+key ชุดนี้ส่ง order ได้ แท็บนี้จึงกันไว้ที่โค้ด:
+
+- ทุก request ผ่าน `ReadOnlyGuard` ที่ให้ผ่านเฉพาะ `GET /trading/accounts/list`, `GET /trading/assets/positions/list`,
+  `GET /market-data/stocks/snapshots/list`, `GET /market-data/options/snapshots/list` — endpoint ที่เปลี่ยนสถานะของ
+  Webull (order place/preview/replace/cancel, token create/refresh/check) เป็น POST ทั้งหมด จึงถูกปฏิเสธก่อนออก network
+- ไม่สร้าง `TradeClient` / `DataClient` เพราะ constructor ของ SDK สร้าง token ใหม่ (อาจต้องยืนยัน 2FA และกระทบ token ของ bot)
+  และเขียน `conf/token.txt` — แท็บนี้ไม่สร้าง/ต่ออายุ token และไม่เขียนไฟล์ใด ๆ
+- log ของ SDK (ซึ่งพิมพ์ header ที่มี token ตอน Webull ตอบ error) ถูกปิดไม่ให้ขึ้น log ของแอป · ข้อความ error ปิดค่าลับเป็น `***`
+  · ถ้าตั้ง `WEBULL_API_DEBUG` แท็บจะไม่ทำงาน
 
 ## แท็บ Live Dashboard
 
