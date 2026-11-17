@@ -27,6 +27,7 @@ Fail closed: ข้อมูลที่เส้นไหนต้องใช�
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timezone
 from typing import Any, Iterable, Mapping, Sequence
@@ -40,6 +41,7 @@ from lego_charts import FILL_ALPHA, FONT_FAMILY, LINE, REFERENCE_DASH, theme_tok
 
 RISK_FREE = 0.04                 # r ของ Black-Scholes (แสดงใน caption) · ไม่มีปันผล
 GRID_POINTS = 241
+MIN_GRID_PCT = 1.0               # ln(0) = −∞ → ข้อมูลเริ่มที่ 1% ของ S₀ แม้ช่วงที่เลือกเริ่มที่ 0 (แกน x ยังเริ่มที่ 0)
 NEW_YORK = ZoneInfo("America/New_York")
 US_CLOSE = time(16, 0)           # option หมดอายุ 16:00 เวลา New York
 YEAR_SECONDS = 365.0 * 86400.0
@@ -111,29 +113,87 @@ class Leg:
         return self.kind in ("call", "put")
 
 
+# OCC: ชื่อหุ้น + yymmdd + C/P + strike×1000 (8 หลัก) — แบบมาตรฐานมีช่องว่างคั่นหลังชื่อหุ้นได้
+_OCC = re.compile(r"^([A-Z][A-Z0-9.]*?)(\d{6})([CP])(\d{8})$")
+SKIP_PREFIX = "ข้าม position ที่อ่านไม่ได้: "
+
+
+def parse_occ(symbol) -> dict | None:
+    """``AAA270521C00007000`` → {symbol, expiry, kind, strike} · ไม่ใช่ OCC → None"""
+    match = _OCC.match(str(symbol or "").upper().replace(" ", ""))
+    if not match:
+        return None
+    root, ymd, cp, strike = match.groups()
+    try:
+        expiry = datetime.strptime(ymd, "%y%m%d").date()
+    except ValueError:
+        return None
+    return {"symbol": root, "expiry": expiry, "kind": "call" if cp == "C" else "put",
+            "strike": int(strike) / 1000.0}
+
+
+def _option_rows(position: Mapping) -> list[Mapping]:
+    """ขาของ option: ``legs`` (Webull OpenAPI v3 ตามเอกสาร) หรือ ``items`` (รูปแบบของ Webull MCP)
+    · ไม่มีทั้งคู่แต่ตัว position เป็น option เอง (มี option_type หรือ symbol เป็น OCC) → ใช้ position เป็นขาเดียว"""
+    for key in ("legs", "items"):
+        rows = position.get(key)
+        if isinstance(rows, list) and rows:
+            return [row for row in rows if isinstance(row, Mapping)]
+    if position.get("option_type") or parse_occ(position.get("symbol")):
+        return [position]
+    return []
+
+
 def option_contracts(raw_positions: Iterable[Mapping]) -> list[str]:
     """สัญลักษณ์ OCC ของทุก option ใน positions (ไม่ซ้ำ เรียงตามลำดับที่พบ)"""
     out: list[str] = []
     for position in raw_positions or ():
         if not isinstance(position, Mapping):
             continue
-        for item in position.get("items") or ():
-            spec = _option_spec(position, item)
+        for row in _option_rows(position):
+            spec = _option_spec(position, row)
             if spec and spec["occ"] not in out:
                 out.append(spec["occ"])
     return out
 
 
-def _option_spec(position: Mapping, item: Mapping) -> dict | None:
-    if not isinstance(item, Mapping):
+def _option_spec(position: Mapping, row: Mapping) -> dict | None:
+    """ชนิด / วันหมดอายุ / strike จาก field ของขา · ขาดตัวไหนใช้ค่าจากสัญลักษณ์ OCC (ของขาหรือของ position)
+    · ชื่อหุ้น = รากของ OCC ถ้ามี ไม่งั้น symbol ของขาหรือของ position"""
+    if not isinstance(row, Mapping):
         return None
-    kind = str(item.get("option_type") or "").lower()
-    expiry, strike = _date(item.get("option_expire_date")), _num(item.get("option_exercise_price"))
-    symbol = str(item.get("symbol") or position.get("symbol") or "").upper()
+    occ = parse_occ(row.get("symbol")) or parse_occ(position.get("symbol")) or {}
+    kind = str(row.get("option_type") or occ.get("kind") or "").lower()
+    expiry = _date(row.get("option_expire_date")) or occ.get("expiry")
+    strike = _num(row.get("option_exercise_price"))
+    strike = strike if strike is not None else occ.get("strike")
+    symbol = str(occ.get("symbol") or row.get("symbol") or position.get("symbol") or "").upper()
     if kind not in ("call", "put") or expiry is None or strike is None or not symbol:
         return None
     return {"symbol": symbol, "kind": kind, "expiry": expiry, "strike": strike,
             "occ": occ_symbol(symbol, expiry, kind, strike)}
+
+
+def _leg_sign(position: Mapping, row: Mapping, count: float | None) -> float:
+    """ซื้อ (+) หรือขาย (−): ``side`` ถ้ามี (MCP) → v3 ไม่มี side ให้ดูเครื่องหมายของจำนวน → ไม่บอก = ซื้อ"""
+    side = str(row.get("side") or position.get("side") or "").upper()
+    if side in ("SELL", "SHORT", "SELL_SHORT"):
+        return -1.0
+    if side in ("BUY", "LONG"):
+        return 1.0
+    total = _num(position.get("quantity"))
+    return -1.0 if (count is not None and count < 0) or (total is not None and total < 0) else 1.0
+
+
+def _field_names(mapping: Mapping) -> str:
+    """ชื่อ field เท่านั้น (ไม่มีค่า) — ใช้บอกว่า Webull ส่งอะไรมาเมื่อแปลงไม่ได้"""
+    return ", ".join(sorted(str(key) for key in mapping.keys())) or "(ว่าง)"
+
+
+def underlying_symbols(raw_positions) -> list[str]:
+    """ชื่อหุ้นของทุก position (option ใช้ชื่อหุ้นอ้างอิง ไม่ใช่สัญลักษณ์ OCC) — ใช้ขอราคาหุ้น"""
+    legs, _ = parse_positions(raw_positions)
+    return sorted({leg.symbol for leg in legs})
 
 
 def _quote_mid(quote: Mapping | None) -> float | None:
@@ -170,30 +230,33 @@ def parse_positions(raw_positions, option_quotes: Mapping | None = None) -> tupl
             legs.append(Leg(symbol, "stock", qty, 1.0, mark, unrealized,
                             cost=_num(position.get("cost_price"))))
         elif kind == "OPTION":
-            items = [item for item in position.get("items") or () if isinstance(item, Mapping)]
-            if not items or unrealized is None:
-                missing = [name for name, ok in (("items", bool(items)),
+            rows = _option_rows(position)
+            if not rows or unrealized is None:
+                missing = [name for name, ok in (("legs/items", bool(rows)),
                                                  ("unrealized_profit_loss", unrealized is not None))
                            if not ok]
-                problems.append(f"OPTION: ไม่พบ field {', '.join(missing)}")
+                problems.append(f"OPTION: ไม่พบ {', '.join(missing)} (มี field: {_field_names(position)})")
                 continue
-            single = len(items) == 1
-            for index, item in enumerate(items):
-                spec = _option_spec(position, item)
-                count = _num(item.get("quantity"))
+            single = len(rows) == 1
+            for index, row in enumerate(rows):
+                spec = _option_spec(position, row)
+                count = _num(row.get("quantity"))
+                if count is None and row is position:
+                    count = _num(position.get("quantity"))
                 if spec is None or count is None:
-                    problems.append("OPTION: ไม่พบ field option_type / option_expire_date / "
-                                    "option_exercise_price / quantity")
+                    problems.append("OPTION: ขาอ่านไม่ได้ ต้องมี option_type / option_expire_date / "
+                                    f"option_exercise_price (หรือ symbol แบบ OCC) และ quantity "
+                                    f"(มี field: {_field_names(row)})")
                     continue
-                sign = -1.0 if str(item.get("side") or "BUY").upper() == "SELL" else 1.0
+                sign = _leg_sign(position, row, count)
                 quote = quotes.get(spec["occ"])
                 mark = _num(position.get("last_price")) if single else _quote_mid(quote)
                 legs.append(Leg(
                     spec["symbol"], spec["kind"], sign * abs(count),
-                    _num(item.get("option_contract_multiplier")) or 100.0, mark,
+                    _num(row.get("option_contract_multiplier")) or 100.0, mark,
                     unrealized if index == 0 else 0.0,     # combo: P/L ของทั้งก้อนอยู่ที่ขาแรก
-                    cost=_num(item.get("cost_price")), strike=spec["strike"],
-                    expiry=spec["expiry"], occ=spec["occ"],
+                    cost=_num(row.get("cost_price")) or (_num(position.get("cost_price")) if single else None),
+                    strike=spec["strike"], expiry=spec["expiry"], occ=spec["occ"],
                     iv=_positive(quote.get("imp_vol")) if quote else None,
                     delta=_num(quote.get("delta")) if quote else None,
                     iv_source="webull" if quote and _positive(quote.get("imp_vol")) else None))
@@ -393,7 +456,7 @@ def build_books(snap: Mapping, chains: Mapping[str, LegoChain], chain_issues: Ma
     """snapshot จาก Webull + state ของ bot → ข้อมูลต่อ symbol (เรียงตามชื่อ) และหมายเหตุรวม"""
     options = snap.get("options")
     legs, problems = parse_positions(snap.get("positions") or [], options or {})
-    notes = [f"ข้าม position ที่อ่านไม่ได้: {p}" for p in problems]
+    notes = [f"{SKIP_PREFIX}{p}" for p in problems]
     if options is None and any(leg.is_option for leg in legs):
         notes.append("ดึงราคา option จาก Webull ไม่ได้ — IV และ delta คำนวณจาก mark ของ positions")
     quotes = snap.get("quotes") or {}
@@ -443,8 +506,9 @@ def exposure_ratio(book: SymbolBook) -> float | None:
 
 def price_grid(spot: float, lo_pct: float = 40, hi_pct: float = 200,
                extra: Iterable[float] = (), n: int = GRID_POINTS) -> np.ndarray:
-    """ราคาห่างเท่ากันจาก lo% ถึง hi% ของ S₀ + จุดสำคัญ (S₀, strike, u*) ที่อยู่ในช่วง"""
-    lo, hi = spot * lo_pct / 100.0, spot * hi_pct / 100.0
+    """ราคาห่างเท่ากันจาก lo% ถึง hi% ของ S₀ + จุดสำคัญ (S₀, strike, u*) ที่อยู่ในช่วง
+    · lo ต่ำสุด MIN_GRID_PCT (ราคา 0 ทำให้เส้น ln เป็น −∞)"""
+    lo, hi = spot * max(lo_pct, MIN_GRID_PCT) / 100.0, spot * hi_pct / 100.0
     points = [spot, *[float(x) for x in extra if x is not None and math.isfinite(float(x))]]
     grid = np.concatenate([np.linspace(lo, hi, n), [p for p in points if lo <= p <= hi]])
     return np.unique(grid)
@@ -534,8 +598,10 @@ def lego_view_curves(chain: LegoChain, grid: np.ndarray) -> pd.DataFrame:
 
 
 def pct_grid(lo_pct: float = 40, hi_pct: float = 200, n: int = GRID_POINTS) -> np.ndarray:
-    """% ของ S₀ (100 = ราคาตอนนี้) สำหรับโหมดรวมพอร์ต"""
-    return np.unique(np.concatenate([np.linspace(lo_pct, hi_pct, n), [100.0]]))
+    """% ของ S₀ (100 = ราคาตอนนี้) สำหรับโหมดรวมพอร์ต · เริ่มอย่างน้อย MIN_GRID_PCT"""
+    lo_pct = max(lo_pct, MIN_GRID_PCT)
+    points = [100.0] if lo_pct <= 100.0 <= hi_pct else []
+    return np.unique(np.concatenate([np.linspace(lo_pct, hi_pct, n), points]))
 
 
 def portfolio_curves(books: Sequence[SymbolBook], pcts: np.ndarray, now: datetime,
@@ -634,6 +700,8 @@ STATUS = {"good": "#0ca30c", "critical": "#d03b3b"}   # dataviz status palette (
 ZONE_ALPHA = 0.045
 ZOOM_PRESETS = (10, 25, 50)                           # ±% รอบราคาตอนนี้
 ALL_LABEL = "ทั้งหมด"
+# Plotly ทาสีปุ่มที่เลือก/ชี้อยู่เป็น #F4FAFF ตายตัว → ปุ่มต้องเป็นพื้นอ่อน + ตัวหนังสือเข้มทุกธีม (ธีมมืดเคยอ่านไม่ออก)
+MENU_COLORS = {"bg": "#e9e8e3", "text": "#0b0b0b", "border": "rgba(11,11,11,0.18)"}
 Y_PAD = 0.08
 
 
@@ -679,8 +747,9 @@ def _zoom_menu(tok: dict, x: np.ndarray, series: Sequence[np.ndarray], center: f
                         args=[{"xaxis.range": full[0], "yaxis.range": full[1]}]))
     return [dict(type="buttons", direction="right", showactive=True, active=len(buttons) - 1,
                  x=1.0, xanchor="right", y=1.02, yanchor="bottom",       # แถวเดียวกับ legend (legend ชิดซ้าย)
-                 pad=dict(t=0, r=0), bgcolor=tok["button"], bordercolor=tok["grid"], borderwidth=1,
-                 font=dict(family=FONT_FAMILY, size=12, color=tok["text_primary"]), buttons=buttons)]
+                 pad=dict(t=0, r=0), bgcolor=MENU_COLORS["bg"], bordercolor=MENU_COLORS["border"],
+                 borderwidth=1, font=dict(family=FONT_FAMILY, size=12, color=MENU_COLORS["text"]),
+                 buttons=buttons)]
 
 
 def _layout(tok: dict, *, height: int, x_title: str, y_title: str, title: str | None,
@@ -790,7 +859,7 @@ def payoff_figure(df: pd.DataFrame, *, x_col: str = PRICE_COL, x_title: str = "�
                   now_pl: float | None = None, strikes: Sequence[float] = (),
                   u_star: float | None = None, theme: str | None = None,
                   title: str | None = None, subtitle: str | None = None,
-                  height: int = 580) -> go.Figure:
+                  x_start: float | None = None, height: int = 580) -> go.Figure:
     """มุมมองบัญชีจริง: เส้น ① ② ③ ④ (เฉพาะที่เลือกและมีข้อมูล) + เส้นตั้ง S₀ / strike / u* + จุดคุ้มทุนของ ①"""
     tok = theme_tokens(theme)
     fig = go.Figure()
@@ -817,6 +886,8 @@ def payoff_figure(df: pd.DataFrame, *, x_col: str = PRICE_COL, x_title: str = "�
                                  fillcolor=_rgba(green, FILL_ALPHA["excess"]) if band else None,
                                  hovertemplate=f"<b>%{{y:,.2f}}</b> USD  {LINE_NAMES[key]}<extra></extra>"))
     lo, hi = float(x.min()), float(x.max())
+    if x_start is not None:                    # เช่น ช่วง 0–200%: แกน x เริ่มที่ 0 แม้ข้อมูลเริ่มที่ 1%
+        lo = min(lo, float(x_start))
     full_y = _y_range(x, [df[k].to_numpy(dtype=float) for k in drawn], lo, hi)
     _zones(fig, tok, full_y)
     for k in strikes:
@@ -859,7 +930,7 @@ def lego_ledger_figure(df: pd.DataFrame, *, x_col: str = PRICE_COL, x_title: str
                        p_acted: float | None = None, u_star: float | None = None,
                        spot: float | None = None, theme: str | None = None,
                        title: str | None = None, subtitle: str | None = None,
-                       height: int = 540) -> go.Figure:
+                       x_start: float | None = None, height: int = 540) -> go.Figure:
     """มุมมอง LEGO model ledger: R(S) (เส้นประอ้างอิง สีเดียวกับ Rₙ ของแท็บ Live) + พื้น A(S) (สีเดียวกับ Aₙ)
 
     ไม่มีโซนกำไร/ขาดทุน เพราะ model ledger ไม่ใช่ P/L ของบัญชี
@@ -878,6 +949,8 @@ def lego_ledger_figure(df: pd.DataFrame, *, x_col: str = PRICE_COL, x_title: str
         customdata=df["gap"], hovertemplate=f"<b>%{{y:,.2f}}</b> USD  {LEGO_NAMES['A']}"
                                             "<br><b>%{customdata:,.2f}</b> USD  A − R(S)<extra></extra>"))
     lo, hi = float(x.min()), float(x.max())
+    if x_start is not None:
+        lo = min(lo, float(x_start))
     series = [df["R"].to_numpy(dtype=float), df["A_floor"].to_numpy(dtype=float)]
     full_y = _y_range(x, series, lo, hi)
     if u_star is not None and math.isfinite(u_star) and lo <= u_star <= hi:
