@@ -31,6 +31,9 @@ READ_ONLY_ALLOWLIST = frozenset({
     ("GET", "/market-data/options/snapshots/list"),
 })
 STOCK_BATCH, OPTION_BATCH = 100, 20             # ข้อจำกัดจำนวน symbol ต่อ request ของ Webull
+# 2 = positions แบบ Webull OpenAPI v3 (option อยู่ใน legs ไม่มี side) ขอราคาหุ้นด้วยชื่อหุ้นอ้างอิง
+# streamlit_app ใช้ค่านี้ตรวจว่าโมดูลในหน่วยความจำเป็นรุ่นเก่าหรือไม่ (hot deploy)
+SNAPSHOT_SCHEMA = 2
 CONNECT_TIMEOUT_S, READ_TIMEOUT_S = 5, 10
 DEBUG_ENV = "WEBULL_API_DEBUG"                  # SDK พิมพ์ request/response ทั้งก้อน (มี token) เมื่อเปิด
 PRIVATE_KEYS = ("account_id", "account_number", "user_id")
@@ -178,7 +181,7 @@ def _fetch(app_key, app_secret, region_id, token, now: datetime, sdk: SimpleName
     if positions and not legs:
         raise WebullReadError("รูปแบบข้อมูล Webull เปลี่ยน: " + " · ".join(sorted(set(problems))))
     notes: list[str] = []
-    symbols = sorted({str(p.get("symbol") or "").upper() for p in positions if p.get("symbol")})
+    symbols = sorted({leg.symbol for leg in legs})       # ชื่อหุ้น (option → หุ้นอ้างอิง ไม่ใช่ OCC)
     quotes: dict[str, dict] = {}
     try:                                         # สถานะตลาด/เวลา quote และ S₀ ของตัวที่มีแต่ option
         for batch in _chunks(symbols, STOCK_BATCH):

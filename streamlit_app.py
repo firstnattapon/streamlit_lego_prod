@@ -97,10 +97,12 @@ import lego_payoff as payoff
 import lego_webull_read as _lego_webull_read
 
 _REQUIRED_PAYOFF_API = ("build_books", "book_curves", "lego_chains", "lego_view_curves",
-                        "portfolio_curves", "portfolio_lego", "payoff_figure", "lego_ledger_figure")
+                        "portfolio_curves", "portfolio_lego", "payoff_figure", "lego_ledger_figure",
+                        # อ่าน legs ของ Webull OpenAPI v3 (รุ่นเก่าอ่านแค่ items → option หาย)
+                        "parse_occ", "underlying_symbols", "SKIP_PREFIX", "chart_config", "MENU_COLORS")
 if any(not hasattr(payoff, name) for name in _REQUIRED_PAYOFF_API):
     payoff = importlib.reload(payoff)
-if not hasattr(_lego_webull_read, "READ_ONLY_ALLOWLIST"):
+if getattr(_lego_webull_read, "SNAPSHOT_SCHEMA", 0) < 2:
     _lego_webull_read = importlib.reload(_lego_webull_read)
 
 from lego_webull_read import WebullReadError, fetch_account_snapshot, redact
@@ -945,7 +947,11 @@ def _render_payoff(snap: dict, chains: dict, chain_issues: dict, now) -> None:
     with action:
         _payoff_refresh_button()
     books, notes = payoff.build_books(snap, chains, chain_issues, now)
-    notes = list(snap.get("notes") or []) + notes
+    skipped = [n[len(payoff.SKIP_PREFIX):] for n in notes if n.startswith(payoff.SKIP_PREFIX)]
+    if skipped:                  # P/L จะไม่ครบ — ต้องเห็นบนสุด ไม่ใช่ซ่อนอยู่ท้ายแท็บ
+        st.warning("P/L ไม่ครบ: ข้าม position ที่อ่านไม่ได้ — " + " · ".join(dict.fromkeys(skipped))
+                   + " (ข้อความนี้มีแค่ชื่อ field ไม่มีค่าบัญชี ส่งให้ผู้ดูแลเพื่อแก้ได้)")
+    notes = list(snap.get("notes") or []) + [n for n in notes if not n.startswith(payoff.SKIP_PREFIX)]
     if not books:
         st.info("ไม่มี position ในบัญชีตอนนี้")
         _payoff_notes(notes)

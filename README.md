@@ -182,6 +182,14 @@ WEBULL_TOKEN_TXT = """
   (อ่าน `webull_lego_state` 1 node + แถวล่าสุด 1 แถวต่อ chain) ไม่ขึ้นกับตัวเลือก PROD/PAPER ใน sidebar
 - ข้อมูลเก็บไว้ 5 นาที (ปุ่มรีเฟรชกดซ้ำได้ทุก 30 วินาที) เพื่อไม่แย่ง rate limit กับ bot
 
+### รูปแบบ positions ที่อ่านได้
+
+`GET /trading/assets/positions/list` (v3) ส่งขาของ option ใน `legs` และไม่มี `side`
+([เอกสาร Webull TH](https://developer.webull.co.th/apis/docs/reference/trade-api/account-position.md))
+แท็บอ่านได้ทั้ง `legs` และ `items` (รูปแบบของ Webull MCP) · symbol แบบ OCC (`AAA270521C00007000`) ใช้แยกชื่อหุ้น/strike/
+วันหมดอายุได้ · ทิศทางใช้ `side` ถ้ามี ไม่งั้นดูเครื่องหมายของจำนวน · position ที่อ่านไม่ได้ขึ้นเตือนบนสุดของแท็บ
+พร้อม **ชื่อ field** ที่ Webull ส่งมา (ไม่มีค่าบัญชี) เพราะ P/L จะไม่ครบ
+
 ### อ่านอย่างเดียว (ตรวจจากซอร์ส SDK 3.0.4)
 
 key ชุดนี้ส่ง order ได้ แท็บนี้จึงกันไว้ที่โค้ด:
