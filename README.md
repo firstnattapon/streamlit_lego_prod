@@ -59,7 +59,7 @@ FIREBASE_DB_URL_PAPER = "https://lego-firebase-paper.asia-southeast1.firebasedat
 
 ## ไฟล์หลัก
 
-- `streamlit_app.py` — หน้า Live Dashboard, Rebalancing 101, Web Apps, Payoff และ Cheat Sheet
+- `streamlit_app.py` — หน้า Live Dashboard, Rebalancing 101, Web Apps, Payoff, Goal และ Cheat Sheet
 - `web_apps/` — คู่มือ/playground แบบ HTML ล้วน แสดงใน iframe ผ่าน `components.html`
   (รายละเอียดด้านล่าง)
 - `cheat_sheet/` — แผนภาพ Mermaid `.mmd` + ภาพ PNG ที่ render ไว้ + `summary.md` (สรุป 10 ข้อ + ประโยคเดียว) ·
@@ -74,6 +74,7 @@ FIREBASE_DB_URL_PAPER = "https://lego-firebase-paper.asia-southeast1.firebasedat
   (pure ไม่ import streamlit / Webull SDK — `test_payoff.py`)
 - `lego_webull_read.py` — อ่าน position + quote จาก Webull OpenAPI **อ่านอย่างเดียว** (GET 4 path, ไม่ส่ง order,
   ไม่สร้าง token, ไม่เขียนไฟล์ — พิสูจน์ใน `test_payoff.py`)
+- `lego_goal.py` — สูตรและกราฟของแท็บ Goal (แยกโมดูล: ไม่ import `lego_payoff` / streamlit — `test_goal.py`)
 - `requirements.txt` — dependency ที่ pin แล้ว
 - `docs/` — คู่มือและแผนการเรียนรู้เพิ่มเติม
 
@@ -216,6 +217,31 @@ key ชุดนี้ส่ง order ได้ แท็บนี้จึง�
   และเขียน `conf/token.txt` — แท็บนี้ไม่สร้าง/ต่ออายุ token และไม่เขียนไฟล์ใด ๆ
 - log ของ SDK (ซึ่งพิมพ์ header ที่มี token ตอน Webull ตอบ error) ถูกปิดไม่ให้ขึ้น log ของแอป · ข้อความ error ปิดค่าลับเป็น `***`
   · ถ้าตั้ง `WEBULL_API_DEBUG` แท็บจะไม่ทำงาน
+
+## แท็บ Goal
+
+Payoff = **ขาหุ้น + ขา LEAPS** เทียบ **เป้า** FIX_C·ln(x/P₀) จากสถานะจริงต่อตัว (หน่วยเป็น model ไม่ใช่ P/L ของบัญชี)
+ใช้ข้อมูลชุดเดียวกับแท็บ Payoff (cache เดียวกัน ไม่เรียก Webull เพิ่ม · อ่านอย่างเดียวเหมือนกัน) · สูตรและกราฟอยู่ใน
+`lego_goal.py` ที่แยกจากแท็บอื่น · **ยังไม่คิด premium**
+
+| ชื่อตัวแปร | (เลขในแอป React) | สมการ | รวมใน payoff |
+| --- | --- | --- | --- |
+| `goal` เป้า | y₆ | fix_c · ln(x / p0) | ❌ |
+| `stock_leg` ขาหุ้น | y₁ | shares · spot · ln(x / p0) | ✅ |
+| `leaps_leg` ขา LEAPS | y₈ | Σ leaps_shares · [max(0, x − K) − max(0, p0 − K)] | ✅ |
+| `payoff` | y₃ | stock_leg + leaps_leg | — |
+| `gap` ห่างจากเป้า | — | payoff − goal | — |
+
+น้ำหนักจากสถานะจริง (วัดที่ราคาตอนนี้): `stock_weight = shares · spot / fix_c` ·
+`leaps_weight = Σ delta · leaps_shares · spot / fix_c` · `coverage = stock_weight + leaps_weight`
+(เท่ากับ exposure จริงของแท็บ Payoff)
+
+- `fix_c`, `p0` จาก chain ของ bot · `spot`, `shares`, strike, delta จาก Webull · `leaps_shares` = 100 × สัญญา
+- ขา LEAPS เริ่มที่ 0 ที่ p0 (เทียบกับเป้าได้) และนับ LEAPS เป็นหุ้นเต็มเหนือ strike · ขาหุ้นใช้ ln แบบ bot rebalance
+- ครอบคลุม 100% และ spot = p0 → payoff ≥ เป้าทุกราคา (x − 1 ≥ ln x) · ความชันเท่ากันที่ p0
+- แท็บมีการ์ดน้ำหนัก, กราฟ 4 เส้น, กราฟห่างจากเป้า, สมการพร้อมค่าจริงแทนลงไป และตารางทุกตัว
+- ไม่มี chain / P₀ / ราคา หรือ Webull กับ bot ไม่ตรงกัน → ไม่วาดตัวนั้นและบอกเหตุผล · รองรับเฉพาะฝั่ง buy
+  (หุ้น long + long call) · ไม่มี delta → ไม่แสดงน้ำหนักของ LEAPS (เส้นยังวาดได้)
 
 ## แท็บ Live Dashboard
 
