@@ -101,7 +101,7 @@ import lego_webull_read as _lego_webull_read
 
 if getattr(_lego_webull_read, "SNAPSHOT_SCHEMA", 0) < 2:
     _lego_webull_read = importlib.reload(_lego_webull_read)
-if getattr(goal, "GOAL_SCHEMA", 0) < 3:          # 3 = แกน 0..1.5 × P₀ · รวมพอร์ต · เปิดเฉพาะเป้า + Payoff + Eₙ
+if getattr(goal, "GOAL_SCHEMA", 0) < 4:          # 4 = รวมพอร์ต "ตอนนี้" เป็น % เทียบเท่าค่าเดียว
     goal = importlib.reload(goal)
 
 from lego_webull_read import WebullReadError, fetch_account_snapshot, redact
@@ -805,9 +805,10 @@ def _goal_cards(items: list, total: dict, combined: bool) -> None:
     """8 การ์ด 2 แถว · รวมพอร์ต = ผลรวมของแต่ละตัวที่ราคาตอนนี้ของตัวเอง · น้ำหนักเทียบ Σ FIX_C"""
     cards = st.columns(4) + st.columns(4)
     if combined:
-        lo, hi = min(i.pct_now for i in items), max(i.pct_now for i in items)
-        cards[0].metric("ตอนนี้ (% ของ P₀)", f"{lo:.0f}–{hi:.0f}%" if round(lo) != round(hi) else f"{lo:.0f}%",
-                        help=" · ".join(f"{i.symbol} {i.pct_now:.1f}%" for i in items))
+        cards[0].metric("ตอนนี้ (% ของ P₀)", f"{goal.portfolio_pct_now(items):.1f}%",
+                        help=("ค่าเฉลี่ยเรขาคณิตถ่วงด้วย FIX_C ของแต่ละตัว ("
+                              + " · ".join(f"{i.symbol} {i.pct_now:.1f}%" for i in items)
+                              + ") — ที่ % นี้เส้นเป้ารวมเท่ากับผลรวมเป้าตอนนี้พอดี"))
     else:
         inputs = items[0]
         cards[0].metric("ราคาตอนนี้", f"{inputs.spot:,.2f}",
@@ -847,9 +848,9 @@ def _render_goal(snap: dict, chains: dict, chain_issues: dict, now) -> None:
         _goal_notes(issues + notes)
         return
     choices = [i.symbol for i in items] + ([goal.ALL] if len(items) > 1 else [])
-    if st.session_state.get("goal_symbol") not in choices:
-        st.session_state["goal_symbol"] = choices[0]
-    pick = st.segmented_control("ตัว", choices, key="goal_symbol") or choices[0]
+    if st.session_state.get("goal_symbol") not in choices:      # ค่าเริ่มต้น = รวมพอร์ต (มี ≥ 2 ตัว)
+        st.session_state["goal_symbol"] = choices[-1]
+    pick = st.segmented_control("ตัว", choices, key="goal_symbol") or choices[-1]
     combined = pick == goal.ALL
     picked = items if combined else [next(i for i in items if i.symbol == pick)]
     total = goal.summary(picked)
@@ -859,7 +860,8 @@ def _render_goal(snap: dict, chains: dict, chain_issues: dict, now) -> None:
     if combined:
         axis = goal.portfolio_axis(picked)
         df = goal.portfolio_curves(picked, goal.pct_grid(picked))
-        fig = goal.goal_figure(df, axis, theme=theme, title="รวมพอร์ต · Payoff + Eₙ เทียบเป้า",
+        fig = goal.goal_figure(df, axis, now=(goal.portfolio_pct_now(picked), total), theme=theme,
+                               title="รวมพอร์ต · Payoff + Eₙ เทียบเป้า",
                                subtitle=(f"{len(picked)} ตัว · Σ FIX_C {total['fix_c']:,.0f} · ครอบคลุม "
                                          f"{_percent(total['coverage'])} · Σ Eₙ {_signed(total['excess'])} · {stamp}"))
         filename, equations = "goal_portfolio", goal.portfolio_equation_text(picked)

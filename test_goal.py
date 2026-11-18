@@ -171,6 +171,18 @@ def test_the_portfolio_sums_each_symbol_at_the_same_percent_of_its_own_p0():
     assert np.allclose(df["goal"], 3000 * np.log(df[goal.PCT] / 100))
 
 
+def test_at_the_portfolio_now_percent_the_goal_line_equals_the_sum_of_todays_goals():
+    items = [inputs_of(aaa_book()), inputs_of(book(SIXTY_FORTY.legs, spot=7.2, excess=10.0, symbol="BBB"))]
+    now = goal.portfolio_pct_now(items)                              # 90% กับ 80% (FIX_C เท่ากัน)
+    assert now == pytest.approx(100 * math.sqrt(0.9 * 0.8))
+    at = goal.portfolio_curves(items, [now]).iloc[0]
+    total = goal.summary(items)
+    assert at["goal"] == pytest.approx(total["goal"])                 # ตรงพอดีตามนิยาม (Payoff ไม่ใช่ ln ล้วน → ใกล้เคียง)
+    assert now in goal.pct_grid(items)
+    text = goal.portfolio_equation_text(items)
+    assert f"ตอนนี้ (เทียบเท่า) pct* = 100 · exp(Σ fix_c_i · ln(pct_i / 100) / Σ fix_c_i) = {now:.2f}%" in text
+
+
 def test_one_symbol_without_excess_removes_payoff_plus_e_from_the_portfolio():
     items = [inputs_of(aaa_book()), inputs_of(bbb_book(excess=None))]
     df = goal.portfolio_curves(items, [80.0, 120.0])
@@ -188,7 +200,9 @@ def test_the_portfolio_summary_adds_today_values_and_weights_by_total_fix_c():
         assert total[key] == pytest.approx(goal.goal_at(aaa)[key] + goal.goal_at(bbb)[key])
     axis = goal.portfolio_axis([aaa, bbb])
     assert (axis.col, axis.x_max, axis.suffix) == (goal.PCT, 150.0, "%")
-    assert axis.now_band == (90.0, 100.0, "ตอนนี้ 90–100%")
+    now = goal.portfolio_pct_now([aaa, bbb])
+    assert now == pytest.approx(100 * math.sqrt(0.9))                 # FIX_C เท่ากัน → เฉลี่ยเรขาคณิตของ 90% กับ 100%
+    assert axis.marks == ((100.0, "P₀ (100%)", "dash", False), (now, "ตอนนี้ 94.9%", "solid", True))
     text = goal.portfolio_equation_text([aaa, bbb])
     assert text.startswith("รวมพอร์ต (2 ตัว)") and "goal_รวม(pct)     = Σ fix_c_i · ln(pct / 100) = 3,000" in text
     assert "payoff_e_รวม(pct) = payoff_รวม(pct) + Σ excess_i = payoff_รวม(pct) +30.00" in text
@@ -253,8 +267,8 @@ def test_the_portfolio_chart_uses_percent_of_p0_and_a_band_for_today():
     fig = goal.goal_figure(goal.portfolio_curves(items, goal.pct_grid(items)), axis)
     assert list(fig.layout.xaxis.range) == [0.0, 150.0] and fig.layout.xaxis.ticksuffix == "%"
     texts = {a.text for a in fig.layout.annotations}
-    assert {"P₀ (100%)", "ตอนนี้ 90–100%"} <= texts
-    assert len(fig.layout.shapes) == 2                                # เส้น P₀ + แถบตอนนี้
+    assert {"P₀ (100%)", "ตอนนี้ 94.9%"} <= texts
+    assert len(fig.layout.shapes) == 2                                # เส้น P₀ + เส้นตอนนี้
 
 
 def test_the_module_stays_isolated():
@@ -300,11 +314,10 @@ def test_the_goal_tab_has_a_portfolio_choice(monkeypatch):
     app.run(timeout=30)
     assert not app.exception and not app.error, [e.value for e in app.error]
     picker = app.button_group(key="goal_symbol")
-    assert list(picker.options) == ["AAA", "BBB", goal.ALL]
-    picker.set_value(goal.ALL).run(timeout=30)
-    assert not app.exception and not app.error, [e.value for e in app.error]
+    assert list(picker.options) == ["AAA", "BBB", goal.ALL] and picker.value == goal.ALL     # ค่าเริ่มต้น = รวมพอร์ต
     metrics = {m.label: m.value for m in app.metric}
-    assert metrics["ตอนนี้ (% ของ P₀)"] == "80–90%" and metrics["ครอบคลุม FIX_C"] == "90.4%"
+    now = 100 * math.exp((1500 * math.log(0.9) + 1000 * math.log(0.8)) / 2500)          # ถ่วงด้วย FIX_C
+    assert metrics["ตอนนี้ (% ของ P₀)"] == f"{now:.1f}%" == "85.9%" and metrics["ครอบคลุม FIX_C"] == "90.4%"
     expected = 540 * math.log(0.9) - 100 + 1000 * math.log(0.8)                       # AAA + BBB ที่ราคาตอนนี้
     assert metrics["Payoff ตอนนี้"] == f"{expected:+,.2f}" == "-380.04"
     assert metrics["Eₙ สะสม (bot)"] == "+25.00" and metrics["Payoff + Eₙ ตอนนี้"] == "-355.04"
