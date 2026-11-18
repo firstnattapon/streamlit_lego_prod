@@ -1,6 +1,6 @@
 """streamlit_app.py — Dashboard (read-only) อ่านจาก Firebase RTDB + Rebalancing 101
 
-6 แท็บ:
+5 แท็บ:
   📊 Live Dashboard   — อ่าน Firebase ครั้งเดียวต่อการโหลดหน้า (lego_live_data.Snapshot) แล้วแสดงใน
                         st.fragment: ตัวเลือก Chain (จำไว้ใน URL ?chain=) → หัวข้อ "หุ้น · Live" พร้อมสถานะ
                         สด/ค้าง/ผิดพลาด เวลาอัปเดต และปุ่มรีเฟรช → ตัวกรองวัน (UTC) → แท็บย่อย
@@ -14,10 +14,9 @@
   🌐 Web Apps         — คู่มือ/playground แบบโต้ตอบ (HTML ล้วนใน web_apps/ แสดงใน iframe)
                         คัดลอกจากแท็บ Web Apps ของ pages/Manual.py (leg-code):
                         Rebalancing 101 + Rebalancing Playground — ไม่เรียก Firebase
-  📐 Payoff           — เส้น payoff จาก position จริงใน Webull (lego_payoff.py + lego_webull_read.py: GET อย่างเดียว
-                        4 path ไม่ส่ง order ไม่สร้าง token) + มุมมอง LEGO model ledger จาก webull_lego_state ของ PROD
-  🎯 Goal             — Payoff = ขาหุ้น + ขา LEAPS เทียบเป้า FIX_C·ln(x/P₀) จากสถานะจริง (lego_goal.py แยกโมดูล
-                        ใช้ข้อมูลชุดเดียวกับ 📐 Payoff ไม่เรียก Webull เพิ่ม · ยังไม่คิด premium)
+  🎯 Goal             — Payoff = ขาหุ้น + ขา LEAPS (+ Eₙ ของ bot) เทียบเป้า FIX_C·ln(x/P₀) จากสถานะจริง ต่อตัว
+                        และรวมพอร์ต (สูตร/กราฟ: lego_goal.py · position จริง: lego_webull_read.py GET อย่างเดียว
+                        4 path ไม่ส่ง order ไม่สร้าง token + lego_positions.py · chain ของ bot จาก PROD) · ยังไม่คิด premium
   ⚡ Cheat Sheet       — แท็บย่อย 📝 Summary: สรุป 10 ข้อ + ประโยคเดียว (cheat_sheet/summary.md)
                         และ 🔀 Diagrams: แผนภาพ Mermaid (.mmd ใน cheat_sheet/): main rebalancing,
                         rollover (beta += (Fix_c − Fix_c_new) * ln(P_acted / P₀)) และ Option Scale
@@ -35,7 +34,6 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import firebase_admin
-import numpy as np
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
@@ -95,29 +93,18 @@ from lego_live_data import (ERROR, LIVE, STALE, ChainView, Freshness, Snapshot, 
 from lego_charts import (MAX_ACT_MARKERS, PLOTLY_CONFIG, ledger_figure,
                          total_excess_figure)
 
-# แท็บ 📐 Payoff — reload guard แบบเดียวกับด้านบน (hot deploy ต้องไม่ได้โมดูลรุ่นเก่าปนกับหน้าใหม่)
-import lego_payoff as payoff
+# แท็บ 🎯 Goal — position จริงจาก Webull (อ่านอย่างเดียว) + chain ของ bot · reload guard แบบเดียวกับด้านบน
+# (hot deploy ต้องไม่ได้โมดูลรุ่นเก่าปนกับหน้าใหม่)
+import lego_goal as goal
+import lego_positions as positions
 import lego_webull_read as _lego_webull_read
 
-_REQUIRED_PAYOFF_API = ("build_books", "book_curves", "lego_chains", "lego_view_curves",
-                        "portfolio_curves", "portfolio_lego", "payoff_figure", "lego_ledger_figure",
-                        # อ่าน legs ของ Webull OpenAPI v3 (รุ่นเก่าอ่านแค่ items → option หาย)
-                        "parse_occ", "underlying_symbols", "SKIP_PREFIX", "chart_config", "MENU_COLORS",
-                        # มุมมองแบบ 11 สมการ (y₃ = Σ Active · y₅ deep call LEAPS · y₆ Benchmark)
-                        "eleven_params", "eleven_curves", "eleven_portfolio", "eleven_figure",
-                        "ELEVEN_SCHEMA")      # 2 = มี y₈ Call Intrinsic ของ LEAPS จริง
-if any(not hasattr(payoff, name) for name in _REQUIRED_PAYOFF_API):
-    payoff = importlib.reload(payoff)
 if getattr(_lego_webull_read, "SNAPSHOT_SCHEMA", 0) < 2:
     _lego_webull_read = importlib.reload(_lego_webull_read)
+if getattr(goal, "GOAL_SCHEMA", 0) < 3:          # 3 = แกน 0..1.5 × P₀ · รวมพอร์ต · เปิดเฉพาะเป้า + Payoff + Eₙ
+    goal = importlib.reload(goal)
 
 from lego_webull_read import WebullReadError, fetch_account_snapshot, redact
-
-# แท็บ 🎯 Goal — โมดูลแยก (ไม่ import lego_payoff) · reload guard แบบเดียวกัน
-import lego_goal as goal
-
-if getattr(goal, "GOAL_SCHEMA", 0) < 2:            # 2 = มีเส้น Payoff + Eₙ
-    goal = importlib.reload(goal)
 
 # Web Apps: คู่มือ/playground แบบ HTML ล้วน (self-contained) แสดงใน iframe ผ่าน
 # components.html — ชุดนี้คัดลอกมาจากแท็บ "🌐 Web Apps" ของ pages/Manual.py (leg-code)
@@ -729,19 +716,19 @@ def render_prod_banner(paper: bool = False) -> None:
                  "ตรวจ st.secrets ก่อนเชื่อตัวเลขในหน้านี้")
 
 
-# ---------------------------------------------------------------- 📐 Payoff (แท็บใหม่)
+# ---------------------------------------------------------------- 🎯 Goal
 # position จริงจาก Webull OpenAPI แบบอ่านอย่างเดียว (lego_webull_read: GET 4 path ไม่ส่ง order ไม่สร้าง token)
-# + state ของ bot จาก PROD (อ่าน 1 node + แถวล่าสุด 1 แถวต่อ chain) · สูตรทั้งหมดอยู่ใน lego_payoff
+# + chain ของ bot จาก PROD (อ่าน 1 node + แถวล่าสุด 1 แถวต่อ chain) · สูตรและกราฟทั้งหมดอยู่ใน lego_goal
+# · widget key ขึ้นต้นด้วย goal_
 WEBULL_SECRETS = ("WEBULL_APP_KEY", "WEBULL_APP_SECRET", "WEBULL_REGION_ID", "WEBULL_TOKEN_TXT")
-PAYOFF_TTL_S, PAYOFF_COOLDOWN_S = 300, 30      # ไม่แย่ง rate limit / token กับ bot PROD
-PAYOFF_ALL = "รวมพอร์ต"
-PAYOFF_VIEW_REAL, PAYOFF_VIEW_LEGO = "💵 บัญชีจริง (Webull)", "🧬 LEGO model ledger"
-PAYOFF_VIEW_ELEVEN = "🧩 แบบ 11 สมการ"
-PAYOFF_VIEWS = (PAYOFF_VIEW_REAL, PAYOFF_VIEW_LEGO, PAYOFF_VIEW_ELEVEN)
-PAYOFF_RANGE_DEFAULT = (0, 200)             # 0 ถึง 2 × S₀
-PAYOFF_CHART_HINT = ("ชี้เมาส์ = ค่าทุกเส้นที่ราคานั้น · ปุ่ม ±10/25/50% มุมขวาบน = ซูมรอบราคาตอนนี้ · "
-                     "ลากแถบใต้กราฟ = เลื่อนดูช่วงราคา · คลิกชื่อเส้น = ซ่อน/โชว์ (ดับเบิลคลิก = ดูเส้นเดียว) · "
-                     "ดับเบิลคลิกกราฟ = กลับมุมมองเริ่มต้น · 📷 แถบเครื่องมือ = ดาวน์โหลด PNG")
+WEBULL_TTL_S, WEBULL_COOLDOWN_S = 300, 30      # ไม่แย่ง rate limit / token กับ bot PROD
+GOAL_NOTE = ("ยังไม่คิด premium: ขา LEAPS = intrinsic เทียบจาก P₀ (เริ่มที่ 0 ที่ P₀ เหมือนเป้า) · "
+             "ขาหุ้นใช้ ln แบบ bot rebalance · Payoff + Eₙ = Payoff + ส่วนเกินสะสมของ bot ถึงวันนี้ "
+             "(ค่าคงที่ทั้งเส้น ไม่รวม Eₙ ในอนาคต · แถบจางระหว่างเส้น Payoff กับ Payoff + Eₙ = Eₙ) · "
+             "หน่วยเป็น model ไม่ใช่ P/L ของบัญชี")
+GOAL_CHART_HINT = ("ตอนเริ่มเปิดเฉพาะเป้ากับ Payoff + Eₙ · คลิกชื่อเส้นใน legend = ซ่อน/โชว์ (ดับเบิลคลิก = ดูเส้นเดียว) · "
+                   "แกน y พอดีกับช่วงตั้งแต่ 25% ของ P₀ (ซ้ายกว่านั้น ln ลงลึก) · ปุ่ม Autoscale = ดูทั้งเส้น · "
+                   "ดับเบิลคลิกกราฟ = กลับมุมมองเริ่มต้น")
 _RUN_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 
 
@@ -755,7 +742,7 @@ def _webull_fingerprint() -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
-@st.cache_data(ttl=PAYOFF_TTL_S, show_spinner=False)
+@st.cache_data(ttl=WEBULL_TTL_S, show_spinner=False)
 def _webull_snapshot(fingerprint: str) -> dict:
     """เรียก Webull อย่างมาก 5 นาทีครั้งต่อชุด secrets (4 GET) — exception ไม่ถูก cache"""
     return fetch_account_snapshot(
@@ -764,8 +751,8 @@ def _webull_snapshot(fingerprint: str) -> dict:
         environment=str(st.secrets.get("WEBULL_ENVIRONMENT", "prod")))
 
 
-@st.cache_data(ttl=PAYOFF_TTL_S, show_spinner=False)
-def _payoff_lego_state() -> tuple[dict, dict]:
+@st.cache_data(ttl=WEBULL_TTL_S, show_spinner=False)
+def _bot_chains() -> tuple[dict, dict]:
     """PROD เท่านั้น: webull_lego_state + แถวล่าสุด 1 แถวต่อ chain (ไม่อ่าน webull_lego_rows ทั้ง node)"""
     if not (_has_secret("FIREBASE_SA_JSON") and _prod_url()):
         return {}, {}
@@ -777,10 +764,10 @@ def _payoff_lego_state() -> tuple[dict, dict]:
             run_id = pointer.get("last_run_id") if isinstance(pointer, dict) else None
             if isinstance(run_id, str) and _RUN_ID.fullmatch(run_id):
                 rows[chain_key] = _ref(f"webull_lego_rows/{run_id}").get()
-    return payoff.lego_chains(state, rows)
+    return positions.lego_chains(state, rows)
 
 
-def _payoff_status_line(snap: dict) -> str:
+def _webull_status_line(snap: dict) -> str:
     stamp = pd.to_datetime(snap.get("as_of"), utc=True, errors="coerce")
     when = "—" if pd.isna(stamp) else stamp.strftime("%Y-%m-%d %H:%M UTC")
     status = sorted({str(q.get("trade_status")) for q in (snap.get("quotes") or {}).values()
@@ -788,406 +775,119 @@ def _payoff_status_line(snap: dict) -> str:
     return f"ดึงเมื่อ {when} · ตลาด: {', '.join(status) or '—'} · {snap.get('account_count', 0)} บัญชี"
 
 
-def _payoff_refresh_button() -> None:
+def _goal_refresh_button() -> None:
     """อ่าน Webull + Firebase ใหม่ · กดซ้ำได้หลัง cooldown 30 วินาที (กัน rate limit ร่วมกับ bot)"""
     now = pd.Timestamp.now(tz="UTC").timestamp()
-    wait = PAYOFF_COOLDOWN_S - (now - float(st.session_state.get("payoff_refreshed_at", 0.0)))
-    if st.button("⟳ รีเฟรช", key="payoff_refresh", disabled=wait > 0,
+    wait = WEBULL_COOLDOWN_S - (now - float(st.session_state.get("goal_refreshed_at", 0.0)))
+    if st.button("⟳ รีเฟรช", key="goal_refresh", disabled=wait > 0,
                  help=(f"รีเฟรชได้อีกใน {wait:.0f} วินาที" if wait > 0
-                       else f"ข้อมูลเก็บไว้ {PAYOFF_TTL_S // 60} นาที กดเพื่อดึงใหม่")):
-        st.session_state["payoff_refreshed_at"] = now
+                       else f"ข้อมูลเก็บไว้ {WEBULL_TTL_S // 60} นาที กดเพื่อดึงใหม่")):
+        st.session_state["goal_refreshed_at"] = now
         _webull_snapshot.clear()
-        _payoff_lego_state.clear()
+        _bot_chains.clear()
         st.rerun()
 
 
-def _payoff_choice(key: str, options: list, default):
-    """ค่าใน session state ที่ไม่อยู่ในตัวเลือกแล้ว → กลับไปค่าเริ่มต้น (widget ไม่ส่ง default ซ้ำกับ state)"""
-    if st.session_state.get(key) not in options:
-        st.session_state[key] = default
-
-
-def _payoff_notes(notes: list[str]) -> None:
+def _goal_notes(notes: list[str]) -> None:
     for note in dict.fromkeys(n for n in notes if n):          # ไม่ซ้ำ คงลำดับ
         st.caption(f"ⓘ {note}")
 
 
-def _payoff_range() -> tuple[int, int]:
-    value = st.session_state.get("payoff_range")
-    if not (isinstance(value, (list, tuple)) and len(value) == 2):
-        st.session_state["payoff_range"] = PAYOFF_RANGE_DEFAULT
-    lo, hi = st.slider("ช่วงราคา (% ของราคาปัจจุบัน S₀)", 0, 300, step=5, key="payoff_range",
-                       help="ค่าเริ่มต้น 0 ถึง 2 × S₀ · ราคา 0 ทำให้เส้น ln เป็น −∞ ข้อมูลจึงเริ่มที่ 1% ของ S₀")
-    return lo, hi
+def _signed(value) -> str:
+    return "—" if value is None else f"{value:+,.2f}"
 
 
-def _payoff_stamp(now) -> str:
-    return pd.Timestamp(now).tz_convert("UTC").strftime("%Y-%m-%d %H:%M UTC")
+def _percent(value) -> str:
+    return "—" if value is None else f"{value:.1%}"
 
 
-def _payoff_real(books: list, combined: bool, now) -> list[str]:
-    """มุมมองบัญชีจริง (P/L เทียบทุนของ Webull) — คืนหมายเหตุของเส้นที่ซ่อน"""
-    stamp = _payoff_stamp(now)
-    names = list(payoff.LINE_NAMES.values())
-    current = st.session_state.get("payoff_lines")
-    if not isinstance(current, list) or not set(current) <= set(names):
-        st.session_state["payoff_lines"] = names
-    picked = st.pills("เส้น", names, selection_mode="multi", key="payoff_lines") or []
-    show = [key for key, name in payoff.LINE_NAMES.items() if name in picked]
-    lo, hi = _payoff_range()
-    theme = _streamlit_theme()
+def _goal_cards(items: list, total: dict, combined: bool) -> None:
+    """8 การ์ด 2 แถว · รวมพอร์ต = ผลรวมของแต่ละตัวที่ราคาตอนนี้ของตัวเอง · น้ำหนักเทียบ Σ FIX_C"""
+    cards = st.columns(4) + st.columns(4)
     if combined:
-        df = payoff.portfolio_curves(books, payoff.pct_grid(lo, hi), now)
-        now_pl = sum(book.unrealized for book in books)
-        cards = st.columns(3)
-        cards[0].metric("P/L ตอนนี้ (รวม)", f"{now_pl:+,.2f}")
-        cards[1].metric("จำนวนตัว", len(books))
-        cards[2].metric("FIX_C รวม (bot)", fmt_num(sum(b.usable_chain.fix_c for b in books
-                                                      if b.usable_chain) or None))
-        fig = payoff.payoff_figure(df, x_col=payoff.PCT_COL, show=show, spot=100.0, now_pl=now_pl,
-                                   x_title="% ของราคาปัจจุบัน (สมมติทุกตัวขยับ % เท่ากัน)", theme=theme,
-                                   title="รวมพอร์ต · Payoff ณ ตอนนี้", x_start=float(lo),
-                                   subtitle=f"{len(books)} ตัว · P/L ตอนนี้ {now_pl:+,.2f} USD · {stamp}")
-        x_col, at, filename = payoff.PCT_COL, payoff.TABLE_PCTS, "payoff_portfolio"
+        lo, hi = min(i.pct_now for i in items), max(i.pct_now for i in items)
+        cards[0].metric("ตอนนี้ (% ของ P₀)", f"{lo:.0f}–{hi:.0f}%" if round(lo) != round(hi) else f"{lo:.0f}%",
+                        help=" · ".join(f"{i.symbol} {i.pct_now:.1f}%" for i in items))
     else:
-        book = books[0]
-        if book.spot is None:
-            st.info(f"{book.symbol}: ไม่มีราคาหุ้น จึงวาดเส้นไม่ได้")
-            return []
-        chain = book.usable_chain
-        strikes = sorted({leg.strike for leg in book.options})
-        grid = payoff.price_grid(book.spot, lo, hi, extra=[*strikes, chain.u_star if chain else None])
-        df = payoff.book_curves(book, now, grid)
-        real = sum(leg.qty for leg in book.legs if leg.kind == "stock")
-        leaps = " + ".join(f"{leg.qty:g}×{'C' if leg.kind == 'call' else 'P'}{leg.strike:g}"
-                           for leg in book.options) or "—"
-        expiries = " · ".join(f"{leg.occ} หมดอายุ {leg.expiry:%d/%m/%Y}" for leg in book.options) or None
-        exposure = payoff.exposure_ratio(book)
-        cards = st.columns(6)
-        cards[0].metric("S₀ (USD)", f"{book.spot:,.2f}")
-        cards[1].metric("P/L ตอนนี้", f"{book.unrealized:+,.2f}")
-        cards[2].metric("หุ้นจริง", f"{real:,.2f}")
-        cards[3].metric("Option", leaps, help=expiries)
-        cards[4].metric("FIX_C (bot)", fmt_num(chain.fix_c if chain else None))
-        cards[5].metric("exposure จริง", "—" if exposure is None else f"{exposure:.1%}",
-                        help="(หุ้นจริง + Σ delta × 100 × สัญญา) × S₀ ÷ FIX_C — bot นับ LEAPS เป็นหุ้นเต็ม (delta 1)")
-        fig = payoff.payoff_figure(df, show=show, spot=book.spot, now_pl=book.unrealized,
-                                   strikes=strikes, u_star=chain.u_star if chain else None, theme=theme,
-                                   x_start=book.spot * lo / 100,
-                                   title=f"{book.symbol} · Payoff ณ ตอนนี้",
-                                   subtitle=f"S₀ {book.spot:,.2f} USD · P/L ตอนนี้ {book.unrealized:+,.2f} USD · "
-                                            f"{leaps} · {stamp}")
-        x_col, at = payoff.PRICE_COL, [book.spot * pct / 100 for pct in payoff.TABLE_PCTS]
-        filename = f"payoff_{book.symbol}"
-    st.plotly_chart(fig, theme=None, config=payoff.chart_config(filename), key="payoff_chart")
-    st.caption(PAYOFF_CHART_HINT)
-    hidden = [payoff.LINE_SHORT[k] for k in show if not df[k].notna().all()]
-    with st.expander("ตารางค่า"):
-        st.dataframe(payoff.curve_table(df, x_col, {k: payoff.LINE_NAMES[k] for k in payoff.LINE_KEYS}, at),
-                     hide_index=True)
-        if not combined:
-            st.dataframe(payoff.legs_frame(books[0].legs), hide_index=True)
-    st.caption(f"สมมติฐาน: r = {payoff.RISK_FREE:.0%} · IV จาก Webull (หรือแก้จาก mark) · ① ③ ราคาขยับทันทีวันนี้ · "
-               "③ rebalance ต่อเนื่องจากหุ้นเป้าหมาย FIX_C/S − L (ต่างจากหุ้นจริงไม่เกินแถบ DIFF) ไม่จำลอง DNA gate/DIFF "
-               "และไม่นับ E ที่ได้เพิ่มจากการแกว่ง จึงเป็นค่าขั้นต่ำ · มีเงินสดพอซื้อขาลง · เกิน u* = FIX_C/L "
-               "SELL เกินหุ้นจริง → PASS (ของจริงเป็นขั้น อาจเหลือหุ้นค้างเล็กน้อย) · "
-               "เส้น ① อยู่เหนือ ③ ที่ปลายทั้งสองข้าง = ราคาวิ่งทางเดียวแพ้ถือเฉยๆ")
-    chains = [book.usable_chain for book in books]
-    if all(chains):
-        excess = sum(chain.excess for chain in chains)
-        st.caption(f"④ = ③ + Eₙ สะสมของ bot ({excess:+,.2f} USD) = E ที่เก็บจากความแกว่งแล้ว (model ledger "
-                   "ชุดเดียวกับแท็บ Live) ซึ่งไม่อยู่ใน unrealized ของ Webull · เส้นนี้รวม 2 ledger จึงห่างจาก ③ "
-                   "เท่ากับ Eₙ ทุกราคา (แถบสีระหว่าง ③ กับ ④)")
-    return [f"ซ่อนเส้น {', '.join(hidden)} เพราะข้อมูลไม่พอ (เหตุผลด้านล่าง)"] if hidden else []
-
-
-def _payoff_lego(books: list, combined: bool, now) -> None:
-    """มุมมอง LEGO model ledger — ตัวเลขชุดเดียวกับแท็บ Live ห้ามปนกับ P/L ของ Webull"""
-    stamp = _payoff_stamp(now)
-    lo, hi = _payoff_range()
-    theme = _streamlit_theme()
-    if combined:
-        df = payoff.portfolio_lego(books, payoff.pct_grid(lo, hi))
-        if df is None:
-            st.info("ไม่มี chain ของ bot ที่ใช้ได้ (ดูเหตุผลด้านล่าง)")
-            return
-        usable = [b.usable_chain for b in books if b.usable_chain]
-        cards = st.columns(3)
-        cards[0].metric("Σ Aₙ", f"{sum(c.actual for c in usable):+,.2f}")
-        cards[1].metric("Σ R_basis", f"{sum(c.r_basis for c in usable):+,.2f}")
-        cards[2].metric("Σ Eₙ", f"{sum(c.excess for c in usable):+,.2f}")
-        fig = payoff.lego_ledger_figure(df, x_col=payoff.PCT_COL, theme=theme,
-                                        x_title="% ของราคาปัจจุบัน (สมมติทุกตัวขยับ % เท่ากัน)",
-                                        title="รวมพอร์ต · LEGO model ledger", x_start=float(lo),
-                                        subtitle=f"{len(usable)} chain · Σ Eₙ "
-                                                 f"{sum(c.excess for c in usable):+,.2f} USD · {stamp}")
-        x_col, at, filename = payoff.PCT_COL, payoff.TABLE_PCTS, "lego_ledger_portfolio"
-    else:
-        book = books[0]
-        chain = book.usable_chain
-        if chain is None or book.spot is None:
-            st.info(book.chain_issue or f"{book.symbol}: ไม่มีราคาหุ้น")
-            return
-        grid = payoff.price_grid(book.spot, lo, hi, extra=[chain.p_acted, chain.u_star])
-        df = payoff.lego_view_curves(chain, grid)
-        cards = st.columns(5)
-        cards[0].metric("P₀", fmt_num(chain.p0))
-        cards[1].metric("P_acted", f"{chain.p_acted:,.4f}")
-        cards[2].metric("Aₙ สะสม", f"{chain.actual:+,.2f}")
-        cards[3].metric("R_basis", f"{chain.r_basis:+,.2f}")
-        cards[4].metric("Eₙ สะสม", f"{chain.excess:+,.2f}")
-        fig = payoff.lego_ledger_figure(df, p_acted=chain.p_acted, u_star=chain.u_star, spot=book.spot,
-                                        theme=theme, title=f"{book.symbol} · LEGO model ledger",
-                                        x_start=book.spot * lo / 100,
-                                        subtitle=f"P_acted {chain.p_acted:,.2f} · Aₙ {chain.actual:+,.2f} · "
-                                                 f"Eₙ {chain.excess:+,.2f} USD · {stamp}")
-        x_col, at = payoff.PRICE_COL, [book.spot * pct / 100 for pct in payoff.TABLE_PCTS]
-        filename = f"lego_ledger_{book.symbol}"
-    st.plotly_chart(fig, theme=None, config=payoff.chart_config(filename), key="payoff_lego_chart")
-    st.caption(PAYOFF_CHART_HINT)
-    with st.expander("ตารางค่า"):
-        st.dataframe(payoff.curve_table(df, x_col, {"R": payoff.LEGO_NAMES["R"],
-                                                    "A_floor": payoff.LEGO_NAMES["A"],
-                                                    "gap": "A − R(S)"}, at), hide_index=True)
-    st.caption("model ledger (semantics execution_terminal_funding_v3, LEAPS นับเป็นหุ้นเต็ม) — "
-               "ตัวเลขชุดเดียวกับแท็บ Live ไม่ใช่กำไรจริงในบัญชี · R(S) = R_basis + FIX_C·ln(S/P_acted) · "
-               "พื้น A(S) = Aₙ + FIX_C·ln(min(S,u*)/P_acted) · ที่ P_acted ได้ Aₙ และ R_basis ตรงกับ state · "
-               "ถึง u* ช่องห่าง A − R = Eₙ ปัจจุบัน (ของจริง ≥ เพราะ E ไม่ลด) · เกิน u* bot pass: Eₙ แช่แข็ง "
-               "แต่ R(S) ยังวิ่ง ช่องห่างจึงหด = แพ้ถือเฉยๆ")
-
-
-def _payoff_eleven(books: list, combined: bool, now) -> list[str]:
-    """มุมมองแบบแอป React 11 สมการ — y₃ = Σ Active · y₅ deep call LEAPS · y₆ = R (Benchmark ไม่ถูกรวม)"""
-    stamp = _payoff_stamp(now)
-    names = [payoff.ELEVEN_NAMES[k] for k in payoff.ELEVEN_ACTIVE]
-    current = st.session_state.get("payoff_eleven_active")
-    if not isinstance(current, list) or not set(current) <= set(names):
-        st.session_state["payoff_eleven_active"] = names
-    picked = st.pills("เส้นที่ Active (รวมเป็น y₃)", names, selection_mode="multi",
-                      key="payoff_eleven_active") or []
-    active = [k for k in payoff.ELEVEN_ACTIVE if payoff.ELEVEN_NAMES[k] in picked]
-    show_bench = st.toggle("แสดง y₆ Benchmark (R) — ไม่ถูกรวมใน y₃", value=True, key="payoff_eleven_bench")
-    lo, hi = _payoff_range()
-    theme = _streamlit_theme()
-    if combined:
-        df, skipped = payoff.eleven_portfolio(books, payoff.pct_grid(lo, hi), active)
-        if df is None:
-            st.info("ไม่มีตัวที่วาดแบบ 11 สมการได้ (ดูเหตุผลด้านล่าง)")
-            return skipped
-        at_now = float(np.interp(100.0, df[payoff.PCT_COL], df["y3"])) if len(df) else 0.0
-        cards = st.columns(3)
-        cards[0].metric("y₃ ตอนนี้ (รวม)", f"{at_now:+,.2f}")
-        cards[1].metric("จำนวนตัวที่รวม", len(books) - len(skipped))
-        cards[2].metric("δ₂", f"{payoff.DELTA2:.2f}")
-        fig = payoff.eleven_figure(df, active=active, show_benchmark=show_bench, spot=100.0,
-                                   x_col=payoff.PCT_COL, x_start=float(lo), theme=theme,
-                                   x_title="% ของราคาปัจจุบัน (สมมติทุกตัวขยับ % เท่ากัน)",
-                                   title="รวมพอร์ต · แบบ 11 สมการ",
-                                   subtitle=f"y₃ = Σ Active · {len(books) - len(skipped)} ตัว · {stamp}")
-        x_col, at, filename = payoff.PCT_COL, payoff.TABLE_PCTS, "eleven_portfolio"
-    else:
-        book = books[0]
-        params, issue = payoff.eleven_params(book)
-        if params is None:
-            st.info(issue)
-            return []
-        grid = payoff.price_grid(book.spot, lo, hi, extra=[params.x01])
-        df = payoff.eleven_curves(params, grid, active)
-        now_y3 = float(payoff.eleven_curves(params, [book.spot], active)["y3"].iloc[0])
-        bes = params.break_evens()
-        option_text = " + ".join(f"{contracts / 100:g}×C{strike:g}" for strike, contracts, _ in params.calls) or "—"
-        option_help = " · ".join(
-            f"K {strike:g} · ทุนที่จ่าย {premium:,.2f} USD · BE₈ {be:,.2f}"
-            for (strike, contracts, premium), be in zip(params.calls, bes)) or None
-        cards = st.columns(6)
-        cards[0].metric("x₀₁ = P₀", f"{params.x01:,.2f}")
-        cards[1].metric("δ₁ (ขาลง)", f"{params.delta1:.3f}",
-                        help=f"Dynamic: (มูลค่า option {params.option_value:,.2f} + หุ้นจริง × ราคา "
-                             f"{params.stock_value:,.2f}) ÷ FIX_C {params.fix_c:,.0f}")
-        cards[2].metric("δ₂ (ขาขึ้น)", f"{params.delta2:.2f}")
-        cards[3].metric("Option", option_text, help=option_help)
-        cards[4].metric("FIX_C", f"{params.fix_c:,.0f}")
-        cards[5].metric("y₃ ที่ราคาตอนนี้", f"{now_y3:+,.2f}")
-        if params.note:
-            skipped_notes = [params.note]
-        else:
-            skipped_notes = []
-        fig = payoff.eleven_figure(df, active=active, show_benchmark=show_bench, x01=params.x01,
-                                   strikes=[strike for strike, _, _ in params.calls], break_evens=bes,
-                                   spot=book.spot, x_start=book.spot * lo / 100, theme=theme,
-                                   title=f"{book.symbol} · แบบ 11 สมการ",
-                                   subtitle=f"x₀₁ = P₀ {params.x01:,.2f} · δ₁ {params.delta1:.3f} · "
-                                            f"δ₂ {params.delta2:.2f} · FIX_C {params.fix_c:,.0f} · {stamp}")
-        x_col, at = payoff.PRICE_COL, [book.spot * pct / 100 for pct in payoff.TABLE_PCTS]
-        filename, skipped = f"eleven_{book.symbol}", skipped_notes
-    st.plotly_chart(fig, theme=None, config=payoff.chart_config(filename), key="payoff_eleven_chart")
-    st.caption(PAYOFF_CHART_HINT)
-    with st.expander("ตารางค่า"):
-        st.dataframe(payoff.curve_table(df, x_col, {k: payoff.ELEVEN_NAMES[k] for k in ("y6", "y5", "y8", "y3")},
-                                        at),
-                     hide_index=True)
-    st.caption("สมการที่ 3 (Net): y₃ = Σ(เส้นที่ Active) · * Benchmark y₆ ไม่ถูกรวม · "
-               "สมการที่ 5 (deep call LEAPS): y₅ = 0 + FIX_C × ln(x₁/x₀₁) × δ(x₁), "
-               "δ(x₁) = { x₁ ≥ x₀₁ → δ₂ ; else → δ₁ } · สมการที่ 6 (Benchmark = R): y₆ = 0 + FIX_C × ln(x₁/x₀₁) × δ₂ · "
-               "สมการที่ 8 (Call Intrinsic ของ LEAPS จริง): y₈ = max(0, x₁ − K) × 100 × n − premium ที่จ่าย · "
-               "x₀₁ = P₀ ของ chain · δ₁ = (มูลค่า option + หุ้นจริง × ราคา) ÷ FIX_C จาก Webull ล่าสุด · bias = 0 · "
-               "หน่วยเป็น model ไม่ใช่ P/L ของบัญชี")
-    return [s for s in skipped if s]
-
-
-def _render_payoff(snap: dict, chains: dict, chain_issues: dict, now) -> None:
-    head, action = st.columns([6, 1], vertical_alignment="center")
-    with head:
-        st.subheader("📐 Payoff · บัญชีจริง (Webull)")
-        st.caption(_payoff_status_line(snap) + " · อ่านอย่างเดียว · ไม่ขึ้นกับตัวเลือก PROD/PAPER ใน sidebar")
-    with action:
-        _payoff_refresh_button()
-    books, notes = payoff.build_books(snap, chains, chain_issues, now)
-    skipped = [n[len(payoff.SKIP_PREFIX):] for n in notes if n.startswith(payoff.SKIP_PREFIX)]
-    if skipped:                  # P/L จะไม่ครบ — ต้องเห็นบนสุด ไม่ใช่ซ่อนอยู่ท้ายแท็บ
-        st.warning("P/L ไม่ครบ: ข้าม position ที่อ่านไม่ได้ — " + " · ".join(dict.fromkeys(skipped))
-                   + " (ข้อความนี้มีแค่ชื่อ field ไม่มีค่าบัญชี ส่งให้ผู้ดูแลเพื่อแก้ได้)")
-    notes = list(snap.get("notes") or []) + [n for n in notes if not n.startswith(payoff.SKIP_PREFIX)]
-    if not books:
-        st.info("ไม่มี position ในบัญชีตอนนี้")
-        _payoff_notes(notes)
-        return
-    choices = [book.symbol for book in books] + ([PAYOFF_ALL] if len(books) > 1 else [])
-    _payoff_choice("payoff_symbol", choices, choices[0])
-    _payoff_choice("payoff_view", list(PAYOFF_VIEWS), PAYOFF_VIEW_REAL)
-    pick = st.segmented_control("ตัว", choices, key="payoff_symbol") or choices[0]
-    view = st.segmented_control("มุมมอง", list(PAYOFF_VIEWS), key="payoff_view") or PAYOFF_VIEW_REAL
-    combined = pick == PAYOFF_ALL
-    picked = books if combined else [book for book in books if book.symbol == pick]
-    if view == PAYOFF_VIEW_REAL:
-        notes += _payoff_real(picked, combined, now)
-    elif view == PAYOFF_VIEW_ELEVEN:
-        notes += _payoff_eleven(picked, combined, now)
-    else:
-        _payoff_lego(picked, combined, now)
-    notes += [n for book in picked for n in (*book.notes, book.chain_issue)]
-    _payoff_notes(notes)
-
-
-@st.fragment
-def payoff_panel(snap: dict, chains: dict, chain_issues: dict) -> None:
-    """เนื้อหาแท็บ Payoff — กดเลือกในแท็บ rerun แค่ส่วนนี้ (ไม่เรียก Webull / Firebase ซ้ำ)"""
-    try:
-        _render_payoff(snap, chains, chain_issues, pd.Timestamp.now(tz="UTC").to_pydatetime())
-    except Exception as exc:                 # ไม่พาอีก 4 แท็บล้ม
-        st.error(f"แสดงแท็บ Payoff ไม่ได้ ({type(exc).__name__}: {redact(exc)})")
-
-
-def render_payoff_tab() -> None:
-    if not _webull_ready():
-        st.info("ตั้ง st.secrets: WEBULL_APP_KEY, WEBULL_APP_SECRET, WEBULL_REGION_ID และ WEBULL_TOKEN_TXT "
-                "ก่อน จึงจะเห็น payoff จาก position จริง (แท็บนี้อ่านอย่างเดียว ไม่ส่ง order ไม่สร้าง token)")
-        return
-    try:
-        with st.spinner("กำลังดึง position จาก Webull"):
-            snap = _webull_snapshot(_webull_fingerprint())
-    except Exception as exc:     # WebullReadError = ข้อความไทย (redact แล้ว) · อื่น ๆ = ชนิดเท่านั้น
-        st.error(f"ดึงข้อมูล Webull ไม่ได้ — {exc}" if isinstance(exc, WebullReadError)
-                 else f"ดึงข้อมูล Webull ไม่ได้ ({type(exc).__name__})")
-        return
-    try:
-        chains, chain_issues = _payoff_lego_state()
-    except Exception as exc:     # Firebase ล้ม → ไม่มีเส้น ③ / มุมมอง LEGO (fail closed) + เหตุผล
-        chains, chain_issues = {}, {}
-        st.caption(f"ⓘ อ่าน state ของ bot ไม่ได้ ({type(exc).__name__}) — ซ่อนเส้น ③ และมุมมอง LEGO")
-    payoff_panel(snap, chains, chain_issues)
-
-
-# ---------------------------------------------------------------- 🎯 Goal (แท็บใหม่)
-# Payoff = ขาหุ้น + ขา LEAPS เทียบเป้า FIX_C·ln(x/P₀) จากสถานะจริง · สูตรและกราฟทั้งหมดอยู่ใน lego_goal
-# ใช้ cache ชุดเดียวกับ 📐 Payoff (ไม่เรียก Webull / Firebase เพิ่ม) · widget key ขึ้นต้นด้วย goal_
-GOAL_RANGE_DEFAULT = (25, 200)              # % ของราคาตอนนี้
-GOAL_NOTE = ("ยังไม่คิด premium: ขา LEAPS = intrinsic เทียบจาก P₀ (เริ่มที่ 0 ที่ P₀ เหมือนเป้า) · "
-             "ขาหุ้นใช้ ln แบบ bot rebalance · Payoff + Eₙ = Payoff + ส่วนเกินสะสมของ bot ถึงวันนี้ "
-             "(ค่าคงที่ทั้งเส้น ไม่รวม Eₙ ในอนาคต · แถบจางระหว่างสองเส้น = Eₙ) · หน่วยเป็น model ไม่ใช่ P/L ของบัญชี")
-
-
-def _goal_refresh_button() -> None:
-    """ปุ่มของแท็บนี้เอง (key ไม่ชนแท็บ Payoff) · cooldown ร่วมกับแท็บ Payoff กัน rate limit"""
-    now = pd.Timestamp.now(tz="UTC").timestamp()
-    wait = PAYOFF_COOLDOWN_S - (now - float(st.session_state.get("payoff_refreshed_at", 0.0)))
-    if st.button("⟳ รีเฟรช", key="goal_refresh", disabled=wait > 0,
-                 help=(f"รีเฟรชได้อีกใน {wait:.0f} วินาที" if wait > 0
-                       else f"ข้อมูลเก็บไว้ {PAYOFF_TTL_S // 60} นาที กดเพื่อดึงใหม่")):
-        st.session_state["payoff_refreshed_at"] = now
-        _webull_snapshot.clear()
-        _payoff_lego_state.clear()
-        st.rerun()
-
-
-def _goal_range() -> tuple[int, int]:
-    value = st.session_state.get("goal_range")
-    if not (isinstance(value, (list, tuple)) and len(value) == 2):
-        st.session_state["goal_range"] = GOAL_RANGE_DEFAULT
-    lo, hi = st.slider("ช่วงราคา (% ของราคาตอนนี้)", 0, 300, step=5, key="goal_range",
-                       help="ราคา 0 ทำให้ ln เป็น −∞ ข้อมูลจึงเริ่มที่ 1% ของราคาตอนนี้")
-    return lo, hi
+        inputs = items[0]
+        cards[0].metric("ราคาตอนนี้", f"{inputs.spot:,.2f}",
+                        help=f"P₀ ของ chain {inputs.p0:,.2f} · ตอนนี้ {inputs.pct_now:.1f}% ของ P₀")
+    base = f"FIX_C {total['fix_c']:,.0f}" + (" (รวมทุกตัว)" if combined else "")
+    cards[1].metric("ขาหุ้น (% FIX_C)", _percent(total["stock_weight"]), help=f"หุ้นจริง × ราคาตอนนี้ ÷ {base}")
+    cards[2].metric("ขา LEAPS (% FIX_C)", _percent(total["leaps_weight"]),
+                    help=(f"{' + '.join(f'{i.symbol} {i.option_text()}' for i in items)} · "
+                          f"Σ delta × 100 × สัญญา × ราคาตอนนี้ ÷ {base}"
+                          + (" · ไม่มี delta ของ LEAPS บางขา" if total["leaps_weight"] is None else "")))
+    cards[3].metric("ครอบคลุม FIX_C", _percent(total["coverage"]))
+    cards[4].metric("Payoff ตอนนี้", _signed(total["payoff"]), help=f"เป้าตอนนี้ {_signed(total['goal'])}")
+    cards[5].metric("ห่างจากเป้าตอนนี้", _signed(total["gap"]))
+    no_e = "ไม่มี Eₙ ใน state ของ bot (บางตัว)" if combined else "ไม่มี Eₙ ใน state ของ bot"
+    cards[6].metric("Eₙ สะสม (bot)", _signed(total["excess"]),
+                    help=no_e if total["excess"] is None else "ส่วนเกินสะสมของ chain ถึงวันนี้ (Aₙ − R_basis)")
+    cards[7].metric("Payoff + Eₙ ตอนนี้", _signed(total["payoff_e"]),
+                    help=no_e if total["gap_e"] is None else f"ห่างจากเป้า + Eₙ {_signed(total['gap_e'])}")
 
 
 def _render_goal(snap: dict, chains: dict, chain_issues: dict, now) -> None:
     head, action = st.columns([6, 1], vertical_alignment="center")
     with head:
         st.subheader("🎯 Goal · Payoff เทียบเป้า FIX_C")
-        st.caption(_payoff_status_line(snap) + " · อ่านอย่างเดียว · ยังไม่คิด premium")
+        st.caption(_webull_status_line(snap) + " · อ่านอย่างเดียว · ยังไม่คิด premium")
     with action:
         _goal_refresh_button()
-    books, notes = payoff.build_books(snap, chains, chain_issues, now)
-    skipped = [n for n in notes if n.startswith(payoff.SKIP_PREFIX)]
-    table, issues = goal.goal_overview(books)
-    if table.empty:
+    books, notes = positions.build_books(snap, chains, chain_issues, now)
+    skipped = [n[len(positions.SKIP_PREFIX):] for n in notes if n.startswith(positions.SKIP_PREFIX)]
+    if skipped:                  # ผลรวมจะไม่ครบ — ต้องเห็นบนสุด ไม่ใช่ซ่อนอยู่ท้ายแท็บ
+        st.warning("ข้อมูลไม่ครบ: ข้าม position ที่อ่านไม่ได้ — " + " · ".join(dict.fromkeys(skipped))
+                   + " (ข้อความนี้มีแค่ชื่อ field ไม่มีค่าบัญชี ส่งให้ผู้ดูแลเพื่อแก้ได้)")
+    notes = list(snap.get("notes") or []) + [n for n in notes if not n.startswith(positions.SKIP_PREFIX)]
+    items, issues = goal.collect(books)
+    if not items:
         st.info("ยังไม่มีตัวที่คำนวณได้ (ดูเหตุผลด้านล่าง)" if books else "ไม่มี position ในบัญชีตอนนี้")
-        _payoff_notes(issues + skipped)
+        _goal_notes(issues + notes)
         return
-    symbols = list(table["ตัว"])
-    _payoff_choice("goal_symbol", symbols, symbols[0])
-    pick = st.segmented_control("ตัว", symbols, key="goal_symbol") or symbols[0]
-    inputs, _ = goal.goal_inputs(next(book for book in books if book.symbol == pick))
-    at_now = goal.goal_at(inputs)
-    leaps_w, cover = inputs.leaps_weight, inputs.coverage
-    cards = st.columns(4) + st.columns(4)
-    cards[0].metric("ราคาตอนนี้", f"{inputs.spot:,.2f}", help=f"P₀ ของ chain {inputs.p0:,.2f}")
-    cards[1].metric("ขาหุ้น (% FIX_C)", f"{inputs.stock_weight:.1%}",
-                    help=f"หุ้นจริง {inputs.shares:,.2f} × ราคาตอนนี้ ÷ FIX_C {inputs.fix_c:,.0f}")
-    cards[2].metric("ขา LEAPS (% FIX_C)", "—" if leaps_w is None else f"{leaps_w:.1%}",
-                    help=f"{inputs.option_text()} · Σ delta × 100 × สัญญา × ราคาตอนนี้ ÷ FIX_C"
-                         + (" · ไม่มี delta ของ LEAPS บางขา" if leaps_w is None else ""))
-    cards[3].metric("ครอบคลุม FIX_C", "—" if cover is None else f"{cover:.1%}")
-    cards[4].metric("Payoff ตอนนี้", f"{at_now['payoff']:+,.2f}", help=f"เป้าตอนนี้ {at_now['goal']:+,.2f}")
-    cards[5].metric("ห่างจากเป้าตอนนี้", f"{at_now['gap']:+,.2f}")
-    no_e = "ไม่มี Eₙ ใน state ของ bot"
-    cards[6].metric("Eₙ สะสม (bot)", "—" if inputs.excess is None else f"{inputs.excess:+,.2f}",
-                    help="ส่วนเกินสะสมของ chain ถึงวันนี้ (Aₙ − R_basis)" if inputs.excess is not None else no_e)
-    cards[7].metric("Payoff + Eₙ ตอนนี้", "—" if at_now["payoff_e"] is None else f"{at_now['payoff_e']:+,.2f}",
-                    help=no_e if at_now["gap_e"] is None else f"ห่างจากเป้า + Eₙ {at_now['gap_e']:+,.2f}")
-    lo, hi = _goal_range()
+    choices = [i.symbol for i in items] + ([goal.ALL] if len(items) > 1 else [])
+    if st.session_state.get("goal_symbol") not in choices:
+        st.session_state["goal_symbol"] = choices[0]
+    pick = st.segmented_control("ตัว", choices, key="goal_symbol") or choices[0]
+    combined = pick == goal.ALL
+    picked = items if combined else [next(i for i in items if i.symbol == pick)]
+    total = goal.summary(picked)
+    _goal_cards(picked, total, combined)
     theme = _streamlit_theme()
-    df = goal.goal_curves(inputs, goal.goal_grid(inputs, lo, hi))
-    x_start = inputs.spot * lo / 100
-    fig = goal.goal_figure(df, inputs, theme=theme, x_start=x_start,
-                           title=f"{inputs.symbol} · Payoff = ขาหุ้น + ขา LEAPS เทียบเป้า",
-                           subtitle=(f"FIX_C {inputs.fix_c:,.0f} · P₀ {inputs.p0:,.2f} · หุ้น {inputs.shares:,.2f} "
-                                     f"+ LEAPS {inputs.option_text()} · ครอบคลุม "
-                                     f"{'—' if cover is None else f'{cover:.0%}'} · Eₙ "
-                                     f"{'—' if inputs.excess is None else f'{inputs.excess:+,.2f}'} · "
-                                     f"{_payoff_stamp(now)}"))
+    stamp = pd.Timestamp(now).tz_convert("UTC").strftime("%Y-%m-%d %H:%M UTC")
+    if combined:
+        axis = goal.portfolio_axis(picked)
+        df = goal.portfolio_curves(picked, goal.pct_grid(picked))
+        fig = goal.goal_figure(df, axis, theme=theme, title="รวมพอร์ต · Payoff + Eₙ เทียบเป้า",
+                               subtitle=(f"{len(picked)} ตัว · Σ FIX_C {total['fix_c']:,.0f} · ครอบคลุม "
+                                         f"{_percent(total['coverage'])} · Σ Eₙ {_signed(total['excess'])} · {stamp}"))
+        filename, equations = "goal_portfolio", goal.portfolio_equation_text(picked)
+    else:
+        inputs = picked[0]
+        axis = goal.symbol_axis(inputs)
+        df = goal.goal_curves(inputs, goal.goal_grid(inputs))
+        fig = goal.goal_figure(df, axis, now=(inputs.spot, goal.goal_at(inputs)), theme=theme,
+                               title=f"{inputs.symbol} · Payoff + Eₙ เทียบเป้า",
+                               subtitle=(f"FIX_C {inputs.fix_c:,.0f} · P₀ {inputs.p0:,.2f} · หุ้น {inputs.shares:,.2f} "
+                                         f"+ LEAPS {inputs.option_text()} · ครอบคลุม {_percent(inputs.coverage)} · "
+                                         f"Eₙ {_signed(inputs.excess)} · {stamp}"))
+        filename, equations = f"goal_{inputs.symbol}", goal.equation_text(inputs)
     config = dict(goal.CHART_CONFIG, toImageButtonOptions=dict(goal.CHART_CONFIG["toImageButtonOptions"],
-                                                               filename=f"goal_{inputs.symbol}"))
+                                                               filename=filename))
     st.plotly_chart(fig, theme=None, config=config, key="goal_chart")
-    st.markdown("**ห่างจากเป้า** = Payoff − เป้า และ Payoff + Eₙ − เป้า (เส้น 0 = เป้า)")
-    st.plotly_chart(goal.gap_figure(df, inputs, theme=theme, x_start=x_start), theme=None, config=config,
-                    key="goal_gap_chart")
+    st.caption(GOAL_CHART_HINT)
+    st.markdown("**ห่างจากเป้า** = Payoff − เป้า และ Payoff + Eₙ − เป้า (เส้น 0 = เป้า) · "
+                "ตอนเริ่มเปิดเฉพาะ ห่างจากเป้า + Eₙ (อีกเส้นคลิกชื่อใน legend)")
+    st.plotly_chart(goal.gap_figure(df, axis, theme=theme), theme=None, config=config, key="goal_gap_chart")
     st.caption(GOAL_NOTE)
     with st.expander("สมการ (ชื่อตัวแปร + ค่าจริงที่ราคาตอนนี้)", expanded=True):
-        st.code(goal.equation_text(inputs), language=None)
+        st.code(equations, language=None)
     with st.expander("ทุกตัว (ค่าที่ราคาตอนนี้)"):
+        table = goal.overview_table(items)
         st.dataframe(table, hide_index=True, column_config={
             col: st.column_config.NumberColumn(format="%.2f") for col in table.columns if col not in ("ตัว", "LEAPS")})
-    _payoff_notes(issues + skipped)
+    _goal_notes(issues + notes)
 
 
 @st.fragment
@@ -1201,7 +901,8 @@ def goal_panel(snap: dict, chains: dict, chain_issues: dict) -> None:
 
 def render_goal_tab() -> None:
     if not _webull_ready():
-        st.info("ตั้ง st.secrets ของ Webull ก่อน (เหมือนแท็บ 📐 Payoff) จึงจะเห็น Payoff เทียบเป้าจาก position จริง")
+        st.info("ตั้ง st.secrets: WEBULL_APP_KEY, WEBULL_APP_SECRET, WEBULL_REGION_ID และ WEBULL_TOKEN_TXT "
+                "ก่อน จึงจะเห็น Payoff เทียบเป้าจาก position จริง (แท็บนี้อ่านอย่างเดียว ไม่ส่ง order ไม่สร้าง token)")
         return
     try:
         with st.spinner("กำลังดึง position จาก Webull"):
@@ -1211,7 +912,7 @@ def render_goal_tab() -> None:
                  else f"ดึงข้อมูล Webull ไม่ได้ ({type(exc).__name__})")
         return
     try:
-        chains, chain_issues = _payoff_lego_state()
+        chains, chain_issues = _bot_chains()
     except Exception as exc:     # ไม่มี FIX_C / P₀ = คำนวณไม่ได้ (fail closed) + เหตุผล
         chains, chain_issues = {}, {}
         st.caption(f"ⓘ อ่าน state ของ bot ไม่ได้ ({type(exc).__name__}) — ไม่มี FIX_C และ P₀")
@@ -1232,17 +933,15 @@ def main():
                                  key="database") == DATABASE_PAPER
     render_prod_banner(paper)
 
-    # 📐 Payoff / 🎯 Goal อยู่ก่อน ⚡ Cheat Sheet: เทสต์เดิมกำหนดให้ Cheat Sheet เป็นแท็บสุดท้าย
-    tab_live, tab_101, tab_web, tab_payoff, tab_goal, tab_cheat = st.tabs(
-        ["📊 Live Dashboard", "🎓 Rebalancing 101", "🌐 Web Apps", "📐 Payoff", "🎯 Goal", "⚡ Cheat Sheet"])
+    # 🎯 Goal อยู่ก่อน ⚡ Cheat Sheet: เทสต์เดิมกำหนดให้ Cheat Sheet เป็นแท็บสุดท้าย
+    tab_live, tab_101, tab_web, tab_goal, tab_cheat = st.tabs(
+        ["📊 Live Dashboard", "🎓 Rebalancing 101", "🌐 Web Apps", "🎯 Goal", "⚡ Cheat Sheet"])
     with tab_live:
         render_live_dashboard(paper)
     with tab_101:
         render_rebalancing_101()
     with tab_web:
         render_web_apps()
-    with tab_payoff:
-        render_payoff_tab()
     with tab_goal:
         render_goal_tab()
     with tab_cheat:

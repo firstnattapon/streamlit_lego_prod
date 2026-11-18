@@ -59,7 +59,7 @@ FIREBASE_DB_URL_PAPER = "https://lego-firebase-paper.asia-southeast1.firebasedat
 
 ## ไฟล์หลัก
 
-- `streamlit_app.py` — หน้า Live Dashboard, Rebalancing 101, Web Apps, Payoff, Goal และ Cheat Sheet
+- `streamlit_app.py` — หน้า Live Dashboard, Rebalancing 101, Web Apps, Goal และ Cheat Sheet
 - `web_apps/` — คู่มือ/playground แบบ HTML ล้วน แสดงใน iframe ผ่าน `components.html`
   (รายละเอียดด้านล่าง)
 - `cheat_sheet/` — แผนภาพ Mermaid `.mmd` + ภาพ PNG ที่ render ไว้ + `summary.md` (สรุป 10 ข้อ + ประโยคเดียว) ·
@@ -70,11 +70,11 @@ FIREBASE_DB_URL_PAPER = "https://lego-firebase-paper.asia-southeast1.firebasedat
 - `lego_hover_table.py` — ตาราง HTML ที่ชี้เมาส์ดูที่มาของตัวเลขได้ (ฝังด้วย `components.html`)
 - `lego_charts.py` — กราฟ Plotly ทั้งหมด (pure ไม่ import streamlit จึง test ได้ตรง ๆ — `test_charts.py`)
 - `dna_engine.py` — ตัวถอด DNA แบบเดียวกับ backend
-- `lego_payoff.py` — สูตรและกราฟของแท็บ Payoff: Black-Scholes, เส้น ① ② ③, มุมมอง LEGO model ledger
-  (pure ไม่ import streamlit / Webull SDK — `test_payoff.py`)
+- `lego_positions.py` — position จริงจาก Webull (OpenAPI v3 `legs` / MCP `items`) + chain ของ bot + IV/delta
+  (Black-Scholes) ต่อ symbol (pure ไม่ import streamlit / Webull SDK — `test_positions.py`)
 - `lego_webull_read.py` — อ่าน position + quote จาก Webull OpenAPI **อ่านอย่างเดียว** (GET 4 path, ไม่ส่ง order,
-  ไม่สร้าง token, ไม่เขียนไฟล์ — พิสูจน์ใน `test_payoff.py`)
-- `lego_goal.py` — สูตรและกราฟของแท็บ Goal (แยกโมดูล: ไม่ import `lego_payoff` / streamlit — `test_goal.py`)
+  ไม่สร้าง token, ไม่เขียนไฟล์ — พิสูจน์ใน `test_positions.py`)
+- `lego_goal.py` — สูตรและกราฟของแท็บ Goal (แยกโมดูล: ไม่ import `lego_positions` / streamlit — `test_goal.py`)
 - `requirements.txt` — dependency ที่ pin แล้ว
 - `docs/` — คู่มือและแผนการเรียนรู้เพิ่มเติม
 
@@ -125,43 +125,50 @@ python tools/render_cheat_sheet.py
 Web Apps) — `test_web_apps.py` จะตรวจให้อัตโนมัติว่าทุกหน้าใน `web_apps/` อยู่ในรายการ
 และยัง self-contained
 
-## แท็บ Payoff
+## แท็บ Goal
 
-เส้น payoff ของ position จริงในบัญชี Webull ณ ตอนนี้ (หุ้นจริง + LEAPS) ตัวเลขด้านล่างเป็นตัวอย่างสมมติ
+Payoff = **ขาหุ้น + ขา LEAPS** (+ Eₙ ของ bot) เทียบ **เป้า** FIX_C·ln(x/P₀) จาก position จริงใน Webull ต่อตัวและรวมพอร์ต
+(หน่วยเป็น model ไม่ใช่ P/L ของบัญชี) · สูตรและกราฟอยู่ใน `lego_goal.py` ที่แยกจากแท็บอื่น · **ยังไม่คิด premium**
+ตัวเลขด้านล่างเป็นตัวอย่างสมมติ
 
 ```
-📐 Payoff · บัญชีจริง (Webull)   ดึงเมื่อ 2026-01-02 15:00 UTC · ตลาด: TRADING · 1 บัญชี      [⟳ รีเฟรช]
-ตัว: [ AAA | BBB | รวมพอร์ต ]          มุมมอง: [ 💵 บัญชีจริง (Webull) | 🧬 LEGO model ledger ]
-เส้น: (① T+0 วันนี้) (② ณ หมดอายุ LEAPS) (③ bot rebalance ต่อ) (④ ③ + Eₙ)   ช่วงราคา 40% – 200% ของ S₀
-S₀ 9.00 │ P/L ตอนนี้ −220.00 │ หุ้นจริง 60.00 │ Option 1×C7 │ FIX_C (bot) 1500.00 │ exposure จริง 84.0%
-[ กราฟ: เส้นตั้งที่ S₀ · จุด P/L ตอนนี้ · K · u* · จุดคุ้มทุนของ ① ]   ▸ ตารางค่า
+🎯 Goal · Payoff เทียบเป้า FIX_C   ดึงเมื่อ 2026-01-02 15:00 UTC · ตลาด: TRADING · 1 บัญชี        [⟳ รีเฟรช]
+ตัว: [ AAA | BBB | รวมพอร์ต ]
+ราคาตอนนี้ 9.00 │ ขาหุ้น 36.0% │ ขา LEAPS 48.0% │ ครอบคลุม FIX_C 84.0%
+Payoff ตอนนี้ −156.89 │ ห่างจากเป้า +1.15 │ Eₙ สะสม (bot) +20.00 │ Payoff + Eₙ ตอนนี้ −136.89
+[ กราฟ: เป้า + Payoff + Eₙ (เส้นอื่นคลิก legend) · K · P₀ · ตอนนี้ ]  [ กราฟห่างจากเป้า ]  ▾ สมการ  ▸ ทุกตัว
 ```
 
-**ใช้กราฟ** (Plotly ทำงานในเบราว์เซอร์ ไม่โหลดข้อมูลซ้ำ): ชี้เมาส์ = การ์ดค่าทุกเส้นที่ราคานั้น (หัวการ์ดเป็นราคา + แถว
-"ห่างจากราคาตอนนี้ %") · ปุ่ม **±10% / ±25% / ±50% / ทั้งหมด** มุมขวาบน = ซูมรอบราคาตอนนี้ (แกน y ปรับให้พอดีช่วง) ·
-ลากแถบใต้กราฟ = เลื่อนช่วงราคา · คลิกชื่อเส้น = ซ่อน/โชว์ (ดับเบิลคลิก = ดูเส้นเดียว) · ดับเบิลคลิกกราฟ = กลับมุมมองเริ่มต้น ·
-📷 = ดาวน์โหลด PNG ชื่อไฟล์ตามตัว (มีชื่อกราฟ + ราคา/เวลาในภาพ) · โซนกำไร/ขาดทุนระบายจาง ๆ พร้อมป้าย ▲/▼
+| ชื่อตัวแปร | (เลขในแอป React) | สมการ | รวมใน payoff |
+| --- | --- | --- | --- |
+| `goal` เป้า | y₆ | fix_c · ln(x / p0) | ❌ |
+| `stock_leg` ขาหุ้น | y₁ | shares · spot · ln(x / p0) | ✅ |
+| `leaps_leg` ขา LEAPS | y₈ | Σ leaps_shares · [max(0, x − K) − max(0, p0 − K)] | ✅ |
+| `payoff` | y₃ | stock_leg + leaps_leg | — |
+| `payoff_e` Payoff + Eₙ | — | payoff + excess · `excess` = Eₙ สะสมของ bot ถึงวันนี้ | — |
+| `gap` ห่างจากเป้า | — | payoff − goal | — |
+| `gap_e` ห่างจากเป้า + Eₙ | — | payoff_e − goal | — |
 
-**มุมมอง 💵 บัญชีจริง** (แกน y = P/L เทียบทุนของ Webull · S₀ = `last_price` ของหุ้น · U₀ = Σ unrealized ทุกขา)
+น้ำหนักจากสถานะจริง (วัดที่ราคาตอนนี้): `stock_weight = shares · spot / fix_c` ·
+`leaps_weight = Σ delta · leaps_shares · spot / fix_c` · `coverage = stock_weight + leaps_weight`
 
-| เส้น | สูตร |
-| --- | --- |
-| ① T+0 วันนี้ | U₀ + q·(S−S₀) + Σ option m·n·[BS(S) − BS(S₀)] — ผ่านจุด (S₀, U₀) |
-| ② ณ หมดอายุ LEAPS | U₀ + q·(S−S₀) + Σ option m·n·[V(S) − mark] ณ วันหมดอายุใกล้สุด (ตัวที่หมดทีหลังใช้ BS) |
-| ③ bot rebalance ต่อ | U₀ + F(S) − F(S₀) + Σ option m·n·[BS(S) − BS(S₀)] · F(u) = FIX_C·ln(u′) − L·u′, u′ = min(u, u*), u* = FIX_C/L |
-| ④ ③ + Eₙ | ③ + Eₙ สะสมของ bot (E ที่เก็บจากความแกว่งแล้ว ไม่อยู่ใน unrealized ของ Webull) — สีเดียวกับ ③ เป็นเส้นจุด แถบระหว่าง ③ กับ ④ = Eₙ |
+- `fix_c`, `p0`, `excess` (Eₙ = Aₙ − R_basis) จาก chain ของ bot · `spot` (= `last_price` ของหุ้นใน positions), `shares`,
+  strike, delta จาก Webull (ไม่มี delta → แก้ IV จาก mark ด้วย Black-Scholes r = 4%) · `leaps_shares` = 100 × สัญญา
+- ขา LEAPS เริ่มที่ 0 ที่ p0 (เทียบกับเป้าได้) และนับ LEAPS เป็นหุ้นเต็มเหนือ strike · ขาหุ้นใช้ ln แบบ bot rebalance
+- Payoff + Eₙ เลื่อนทั้งเส้นด้วย Eₙ ของวันนี้ (ไม่รวม Eₙ ในอนาคต) · แถบจางระหว่าง Payoff กับ Payoff + Eₙ = Eₙ
+- ครอบคลุม 100% และ spot = p0 → payoff ≥ เป้าทุกราคา (x − 1 ≥ ln x) · ความชันเท่ากันที่ p0
 
-- ③ = ΔRₙ ของ LEGO ถ้า LEAPS เป็นหุ้นจริง + ส่วนต่างระหว่าง LEAPS จริงกับหุ้น L ตัว · เกิน u* SELL เกินหุ้นจริง → PASS
-  · rebalance ต่อเนื่อง ไม่จำลอง DNA gate/DIFF และไม่นับ E ที่ได้เพิ่มจากการแกว่ง จึงเป็นค่าขั้นต่ำ
-- Black-Scholes ใช้ r = 4% และ IV จาก Webull (ไม่มี → แก้ IV จาก mark ของ positions)
-- **exposure จริง** = (หุ้นจริง + Σ delta·100·สัญญา)·S₀ ÷ FIX_C — bot นับ LEAPS เป็นหุ้นเต็ม (delta 1) จึงเห็นราว 100%
+**กราฟ**: แกนราคา 0 ถึง 1.5 × P₀ (ข้อมูลเริ่มที่ 1% ของ P₀ เพราะ ln(0) = −∞) · **ตอนเริ่มเปิดเฉพาะเป้ากับ Payoff + Eₙ**
+(ขาหุ้น ขา LEAPS และ Payoff คลิกชื่อใน legend เพื่อโชว์ · แถบ Eₙ โชว์พร้อมเส้น Payoff) · แกน y พอดีกับช่วงตั้งแต่ 25% ของ P₀
+(ซ้ายกว่านั้น ln ลงลึกจนกราฟแบน — ปุ่ม Autoscale ดูทั้งเส้น) · กราฟห่างจากเป้ามีทั้ง Payoff − เป้า และ Payoff + Eₙ − เป้า
+(เส้น 0 = เป้า · โซนจาง ▲ เหนือ / ▼ ใต้) **ตอนเริ่มเปิดเฉพาะ ห่างจากเป้า + Eₙ** (อีกเส้นคลิก legend · ไม่มี Eₙ → ห่างจากเป้า)
 
-**มุมมอง 🧬 LEGO model ledger** ตัวเลขชุดเดียวกับแท็บ Live (semantics `execution_terminal_funding_v3`: Eₙ = Aₙ − R_basis)
-ไม่ใช่กำไรจริงในบัญชี และไม่ถูกบวกรวมกับ P/L ของ Webull (ยกเว้นเส้น ④ ที่ระบุชื่อไว้ชัดว่าเป็น ③ + Eₙ):
-R(S) = R_basis + FIX_C·ln(S/P_acted) · พื้น A(S) = Aₙ + FIX_C·ln(min(S,u*)/P_acted) — ที่ P_acted ได้ Aₙ และ R_basis ตรงกับ state
+**รวมพอร์ต** (มีเมื่อคำนวณได้ ≥ 2 ตัว): แกน = 0 ถึง 150% ของ P₀ โดยสมมติทุกตัวขยับ % ของ P₀ ของตัวเองเท่ากัน ·
+แต่ละเส้น = ผลรวมของทุกตัว · แถบ "ตอนนี้" = ช่วง % ของ P₀ ที่แต่ละตัวอยู่ตอนนี้ · การ์ด = ผลรวมของแต่ละตัวที่ราคาตอนนี้
+ของตัวเอง และน้ำหนักเทียบ Σ FIX_C · ตัวไหนไม่มี Eₙ → ไม่มีเส้น Payoff + Eₙ ของทั้งพอร์ต (ไม่รวมแค่บางตัว)
 
-**Fail closed**: ไม่มี state ของ bot (ไม่มี Firebase / ไม่มี chain), Webull กับ bot เห็นหุ้นจริงหรือ LEAPS ไม่ตรงกัน
-(ต่างเกิน 0.01 หุ้น) หรือแก้ IV ไม่ได้ → ซ่อนเส้นที่ต้องใช้ข้อมูลนั้น (③ ④ ต้องใช้ state ของ bot) และบอกเหตุผลใต้กราฟ ไม่ประมาณค่าแทน
+**Fail closed**: ไม่มี chain / P₀ / ราคา, Webull กับ bot เห็นหุ้นจริงหรือ LEAPS ไม่ตรงกัน (ต่างเกิน 0.01 หุ้น),
+มี put หรือขา short → ไม่วาดตัวนั้นและบอกเหตุผล · ไม่มี delta → ไม่แสดงน้ำหนักของ LEAPS (เส้นยังวาดได้)
 
 ### ตั้งค่า (Streamlit secrets)
 
@@ -179,24 +186,9 @@ WEBULL_TOKEN_TXT = """
 
 - `WEBULL_TOKEN_TXT` = เนื้อหา `token.txt` ล่าสุดของ bot (ใช้แค่บรรทัดแรกเป็น header `x-access-token`)
   ถ้าแท็บขึ้น "token ใช้ไม่ได้" ให้คัดลอก token.txt ล่าสุดมาใส่แล้วกด ⟳ รีเฟรช
-- เส้น ③ ④ และมุมมอง LEGO ใช้ `FIREBASE_SA_JSON` + `FIREBASE_DB_URL` ของ PROD ชุดเดิม
+- FIX_C, P₀ และ Eₙ ของ bot ใช้ `FIREBASE_SA_JSON` + `FIREBASE_DB_URL` ของ PROD ชุดเดิม
   (อ่าน `webull_lego_state` 1 node + แถวล่าสุด 1 แถวต่อ chain) ไม่ขึ้นกับตัวเลือก PROD/PAPER ใน sidebar
 - ข้อมูลเก็บไว้ 5 นาที (ปุ่มรีเฟรชกดซ้ำได้ทุก 30 วินาที) เพื่อไม่แย่ง rate limit กับ bot
-
-### มุมมอง 🧩 แบบ 11 สมการ
-
-กรอบเดียวกับแอป React 11 สมการ ใช้ค่าจริงของแต่ละตัว (หน่วยเป็น model ไม่ใช่ P/L ของบัญชี):
-
-| เส้น | สมการ | รวมใน y₃ |
-| --- | --- | --- |
-| y₆ Benchmark (R) | สมการที่ 6: y₆ = 0 + FIX_C × ln(x₁/x₀₁) × δ₂ | ❌ |
-| y₅ deep call LEAPS | สมการที่ 5: y₅ = 0 + FIX_C × ln(x₁/x₀₁) × δ(x₁), δ(x₁) = { x₁ ≥ x₀₁ → δ₂ ; else → δ₁ } | ✅ |
-| y₈ Call Intrinsic (LEAPS จริง) | สมการที่ 8: y₈ = max(0, x₁ − K) × 100 × n − premium ที่จ่ายจริง (cost_price) · มีเส้น K และจุดคุ้มทุน BE₈ = K + premium ต่อหุ้น | ✅ |
-| y₃ Net | สมการที่ 3: y₃ = Σ(เส้นที่ Active) | — |
-
-x₀₁ = P₀ ของ chain (R = 0 ตรงกับ Rₙ ของ LEGO) · δ₂ = 1.0 · bias = 0 ·
-δ₁ = (มูลค่า option ตอนนี้ + หุ้นจริง × ราคา) ÷ FIX_C (โหมด Dynamic ของแอป React ด้วยค่าจาก Webull) ·
-ไม่มี chain / P₀ หรือ Webull กับ bot ไม่ตรงกัน → ไม่วาดและบอกเหตุผล
 
 ### รูปแบบ positions ที่อ่านได้
 
@@ -204,7 +196,7 @@ x₀₁ = P₀ ของ chain (R = 0 ตรงกับ Rₙ ของ LEGO) ·
 ([เอกสาร Webull TH](https://developer.webull.co.th/apis/docs/reference/trade-api/account-position.md))
 แท็บอ่านได้ทั้ง `legs` และ `items` (รูปแบบของ Webull MCP) · symbol แบบ OCC (`AAA270521C00007000`) ใช้แยกชื่อหุ้น/strike/
 วันหมดอายุได้ · ทิศทางใช้ `side` ถ้ามี ไม่งั้นดูเครื่องหมายของจำนวน · position ที่อ่านไม่ได้ขึ้นเตือนบนสุดของแท็บ
-พร้อม **ชื่อ field** ที่ Webull ส่งมา (ไม่มีค่าบัญชี) เพราะ P/L จะไม่ครบ
+พร้อม **ชื่อ field** ที่ Webull ส่งมา (ไม่มีค่าบัญชี) เพราะผลรวมจะไม่ครบ
 
 ### อ่านอย่างเดียว (ตรวจจากซอร์ส SDK 3.0.4)
 
@@ -217,34 +209,6 @@ key ชุดนี้ส่ง order ได้ แท็บนี้จึง�
   และเขียน `conf/token.txt` — แท็บนี้ไม่สร้าง/ต่ออายุ token และไม่เขียนไฟล์ใด ๆ
 - log ของ SDK (ซึ่งพิมพ์ header ที่มี token ตอน Webull ตอบ error) ถูกปิดไม่ให้ขึ้น log ของแอป · ข้อความ error ปิดค่าลับเป็น `***`
   · ถ้าตั้ง `WEBULL_API_DEBUG` แท็บจะไม่ทำงาน
-
-## แท็บ Goal
-
-Payoff = **ขาหุ้น + ขา LEAPS** เทียบ **เป้า** FIX_C·ln(x/P₀) จากสถานะจริงต่อตัว (หน่วยเป็น model ไม่ใช่ P/L ของบัญชี)
-ใช้ข้อมูลชุดเดียวกับแท็บ Payoff (cache เดียวกัน ไม่เรียก Webull เพิ่ม · อ่านอย่างเดียวเหมือนกัน) · สูตรและกราฟอยู่ใน
-`lego_goal.py` ที่แยกจากแท็บอื่น · **ยังไม่คิด premium**
-
-| ชื่อตัวแปร | (เลขในแอป React) | สมการ | รวมใน payoff |
-| --- | --- | --- | --- |
-| `goal` เป้า | y₆ | fix_c · ln(x / p0) | ❌ |
-| `stock_leg` ขาหุ้น | y₁ | shares · spot · ln(x / p0) | ✅ |
-| `leaps_leg` ขา LEAPS | y₈ | Σ leaps_shares · [max(0, x − K) − max(0, p0 − K)] | ✅ |
-| `payoff` | y₃ | stock_leg + leaps_leg | — |
-| `payoff_e` Payoff + Eₙ | (④ ของแท็บ Payoff) | payoff + excess · `excess` = Eₙ สะสมของ bot ถึงวันนี้ | — |
-| `gap` ห่างจากเป้า | — | payoff − goal | — |
-| `gap_e` ห่างจากเป้า + Eₙ | — | payoff_e − goal | — |
-
-น้ำหนักจากสถานะจริง (วัดที่ราคาตอนนี้): `stock_weight = shares · spot / fix_c` ·
-`leaps_weight = Σ delta · leaps_shares · spot / fix_c` · `coverage = stock_weight + leaps_weight`
-(เท่ากับ exposure จริงของแท็บ Payoff)
-
-- `fix_c`, `p0`, `excess` (Eₙ = Aₙ − R_basis) จาก chain ของ bot · Payoff + Eₙ เลื่อนทั้งเส้นด้วยค่าคงที่
-  (ไม่รวม Eₙ ในอนาคต) แถบจางระหว่าง Payoff กับ Payoff + Eₙ = Eₙ · ไม่มี Eₙ → ไม่มีเส้นนี้ · `spot`, `shares`, strike, delta จาก Webull · `leaps_shares` = 100 × สัญญา
-- ขา LEAPS เริ่มที่ 0 ที่ p0 (เทียบกับเป้าได้) และนับ LEAPS เป็นหุ้นเต็มเหนือ strike · ขาหุ้นใช้ ln แบบ bot rebalance
-- ครอบคลุม 100% และ spot = p0 → payoff ≥ เป้าทุกราคา (x − 1 ≥ ln x) · ความชันเท่ากันที่ p0
-- แท็บมีการ์ดน้ำหนัก, กราฟ 4 เส้น, กราฟห่างจากเป้า, สมการพร้อมค่าจริงแทนลงไป และตารางทุกตัว
-- ไม่มี chain / P₀ / ราคา หรือ Webull กับ bot ไม่ตรงกัน → ไม่วาดตัวนั้นและบอกเหตุผล · รองรับเฉพาะฝั่ง buy
-  (หุ้น long + long call) · ไม่มี delta → ไม่แสดงน้ำหนักของ LEAPS (เส้นยังวาดได้)
 
 ## แท็บ Live Dashboard
 

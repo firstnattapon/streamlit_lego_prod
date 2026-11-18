@@ -1,6 +1,6 @@
 """lego_webull_read.py — อ่าน position + quote จาก Webull OpenAPI แบบอ่านอย่างเดียว (ไม่ import streamlit)
 
-คำสัญญา (ตรวจจากซอร์ส webull-openapi-python-sdk 3.0.4 และพิสูจน์ใน test_payoff.py):
+คำสัญญา (ตรวจจากซอร์ส webull-openapi-python-sdk 3.0.4 และพิสูจน์ใน test_positions.py):
   R1 อ่านอย่างเดียว   ทุก request ผ่าน ``ReadOnlyGuard`` ที่ให้ผ่านเฉพาะ GET 4 path ใน ``READ_ONLY_ALLOWLIST``
                       endpoint ที่เปลี่ยนสถานะของ Webull (order place/preview/replace/cancel, token create/
                       refresh/check) เป็น POST ทั้งหมด จึงผ่านด่านนี้ไม่ได้ และถูกปฏิเสธก่อนออก network
@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, Iterable, Mapping
 
-import lego_payoff as payoff
+import lego_positions
 
 READ_ONLY_ALLOWLIST = frozenset({
     ("GET", "/trading/accounts/list"),
@@ -138,7 +138,7 @@ def fetch_account_snapshot(app_key: str, app_secret: str, region_id: str, token_
         if os.environ.get(DEBUG_ENV):
             raise WebullReadError(f"ปิด {DEBUG_ENV} ก่อน (debug ของ SDK พิมพ์ header ที่มี token)")
         try:
-            token, _expires_ms, _status = payoff.parse_token_txt(token_txt)
+            token, _expires_ms, _status = lego_positions.parse_token_txt(token_txt)
         except ValueError as exc:
             raise WebullReadError(str(exc)) from None
         secrets.append(token)
@@ -177,7 +177,7 @@ def _fetch(app_key, app_secret, region_id, token, now: datetime, sdk: SimpleName
             raise _server_error(sdk, exc, "positions") from None
         positions += [_strip_private(p) for p in records if isinstance(p, Mapping)]
 
-    legs, problems = payoff.parse_positions(positions)
+    legs, problems = lego_positions.parse_positions(positions)
     if positions and not legs:
         raise WebullReadError("รูปแบบข้อมูล Webull เปลี่ยน: " + " · ".join(sorted(set(problems))))
     notes: list[str] = []
@@ -192,7 +192,7 @@ def _fetch(app_key, app_secret, region_id, token, now: datetime, sdk: SimpleName
                         "quote_time": q.get("quote_time")}
     except (sdk.ServerException, sdk.ClientException, WebullReadError) as exc:
         notes.append(f"ดึงราคาหุ้นไม่ได้ ({type(exc).__name__}) — ไม่มีสถานะตลาด")
-    occs = payoff.option_contracts(positions)
+    occs = lego_positions.option_contracts(positions)
     options: dict[str, dict] | None = {}
     try:                                         # ไม่บังคับ: ล้มแล้วแก้ IV จาก mark ของ positions แทน
         for batch in _chunks(occs, OPTION_BATCH):
