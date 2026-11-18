@@ -20,8 +20,8 @@ def leg(kind, qty, *, strike=None, delta=None, multiplier=1.0):
                            expiry=date(2027, 5, 21) if kind != "stock" else None)
 
 
-def book(legs, *, spot=9.0, fix_c=1500.0, p0=9.0, chain=True, usable=True, symbol="AAA"):
-    chain_obj = SimpleNamespace(fix_c=fix_c, p0=p0) if chain else None
+def book(legs, *, spot=9.0, fix_c=1500.0, p0=9.0, excess=None, chain=True, usable=True, symbol="AAA"):
+    chain_obj = SimpleNamespace(fix_c=fix_c, p0=p0, excess=excess) if chain else None
     return SimpleNamespace(symbol=symbol, spot=spot, legs=legs, chain=chain_obj,
                            usable_chain=chain_obj if usable else None)
 
@@ -122,6 +122,9 @@ def test_the_equations_use_names_and_real_values():
                  "leaps_leg = Σ leaps_shares · [max(0, x − K) − max(0, p0 − K)] = 100 · [2 − 3] = -100.00",
                  "payoff    = stock_leg + leaps_leg = -156.89",
                  "gap       = payoff − goal = +1.15",
+                 "excess    = Eₙ สะสมของ bot (chain) = +20.00",
+                 "payoff_e  = payoff + excess = -136.89",
+                 "gap_e     = payoff_e − goal = +21.15",
                  "= 96.0 หุ้น · ถืออยู่ 100 หุ้น"):
         assert line in text
 
@@ -140,11 +143,45 @@ def test_the_figures_name_every_line_and_mark_k_p0_and_now():
     assert [t.name for t in fig.data if t.showlegend is not False] == [goal.NAMES[k] for k in goal.LINE_KEYS]
     texts = [a.text for a in fig.layout.annotations]
     assert {"K 7", "P₀ 10", "ตอนนี้ 9"} <= set(texts)
-    assert any(t.startswith("ตอนนี้: Payoff <b>-157</b> · เป้า -158 · ห่าง +1") for t in texts)
+    assert any(t.startswith("ตอนนี้: Payoff <b>-157</b> · +Eₙ -137 · เป้า -158 · ห่าง +1") for t in texts)
     gap = goal.gap_figure(df, inputs)
     assert {"▲ เหนือเป้า", "▼ ใต้เป้า"} <= {a.text for a in gap.layout.annotations}
+    assert [t.name for t in gap.data] == [goal.NAMES["gap"], goal.NAMES["gap_e"]]
     for f in (fig, gap):                       # d3 format ที่ขึ้นต้นด้วย "+" ทำให้ hover ทศนิยมเต็ม
         assert not f.layout.yaxis.hoverformat.startswith("+")
+
+
+def test_payoff_plus_e_shifts_the_payoff_by_the_bot_excess():
+    inputs = inputs_of(aaa_book())
+    assert inputs.excess == 20.0                             # Eₙ สะสมของ chain ใน fixture
+    df = goal.goal_curves(inputs, goal.goal_grid(inputs, 25, 200))
+    assert np.allclose(df["payoff_e"], df["payoff"] + 20.0) and np.allclose(df["gap_e"], df["gap"] + 20.0)
+    now = goal.goal_at(inputs)
+    assert round(now["payoff_e"], 2) == -136.89 and round(now["gap_e"], 2) == 21.15
+    table, _ = goal.goal_overview([aaa_book()])
+    assert table.loc[0, "Eₙ (bot)"] == 20.0 and round(table.loc[0, "Payoff + Eₙ ตอนนี้"], 2) == -136.89
+
+
+def test_the_excess_band_sits_between_payoff_and_payoff_plus_e():
+    inputs = inputs_of(aaa_book())
+    fig = goal.goal_figure(goal.goal_curves(inputs, goal.goal_grid(inputs, 25, 200)), inputs)
+    names = [t.name for t in fig.data]
+    i = names.index(goal.NAMES["payoff_e"])
+    assert names[i - 1] == goal.NAMES["payoff"] and fig.data[i].fill == "tonexty"
+    ends = [a.text.split(" <b>")[0] for a in fig.layout.annotations if a.xanchor == "left" and a.xshift == 8]
+    assert ends == ["เป้า", "Payoff", "Payoff+Eₙ", "LEAPS"]          # ป้ายปลายเส้น ≤ 4
+
+
+def test_without_excess_there_is_no_payoff_plus_e_line():
+    inputs = inputs_of(book([leg("stock", 60), leg("call", 1, strike=7.0, delta=0.8, multiplier=100.0)]))
+    assert inputs.excess is None
+    df = goal.goal_curves(inputs, [8.0, 9.0])
+    assert df["payoff_e"].isna().all() and goal.goal_at(inputs)["payoff_e"] is None
+    fig = goal.goal_figure(df, inputs)
+    assert goal.NAMES["payoff_e"] not in [t.name for t in fig.data]
+    gap = goal.gap_figure(df, inputs)
+    assert len(gap.data) == 1 and gap.data[0].showlegend is False
+    assert "payoff_e  = payoff + excess = —" in goal.equation_text(inputs)
 
 
 def test_the_module_stays_isolated_from_the_payoff_tab():
@@ -164,10 +201,13 @@ def test_the_goal_tab_shows_weights_charts_and_equations(monkeypatch):
     assert metrics["ขาหุ้น (% FIX_C)"] == "36.0%" and metrics["ขา LEAPS (% FIX_C)"] == "48.0%"
     assert metrics["ครอบคลุม FIX_C"] == "84.0%" and metrics["ราคาตอนนี้"] == "9.00"
     assert metrics["Payoff ตอนนี้"] == "-156.89" and metrics["ห่างจากเป้าตอนนี้"] == "+1.15"
+    assert metrics["Eₙ สะสม (bot)"] == "+20.00" and metrics["Payoff + Eₙ ตอนนี้"] == "-136.89"
     assert app.slider(key="goal_range").value == (25, 200)
     assert any("stock_weight = shares · spot / fix_c" in c.value for c in app.code)
     assert app.button_group(key="goal_symbol").value == "AAA"
     assert [t.label for t in app.tabs][4] == "🎯 Goal"
+    import streamlit_app
+    assert streamlit_app.goal.GOAL_SCHEMA >= 2                       # reload guard รู้จักเส้น Payoff + Eₙ
 
 
 def test_without_bot_state_the_goal_tab_explains_why(monkeypatch):

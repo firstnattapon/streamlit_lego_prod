@@ -116,7 +116,7 @@ from lego_webull_read import WebullReadError, fetch_account_snapshot, redact
 # แท็บ 🎯 Goal — โมดูลแยก (ไม่ import lego_payoff) · reload guard แบบเดียวกัน
 import lego_goal as goal
 
-if getattr(goal, "GOAL_SCHEMA", 0) < 1:
+if getattr(goal, "GOAL_SCHEMA", 0) < 2:            # 2 = มีเส้น Payoff + Eₙ
     goal = importlib.reload(goal)
 
 # Web Apps: คู่มือ/playground แบบ HTML ล้วน (self-contained) แสดงใน iframe ผ่าน
@@ -1103,7 +1103,8 @@ def render_payoff_tab() -> None:
 # ใช้ cache ชุดเดียวกับ 📐 Payoff (ไม่เรียก Webull / Firebase เพิ่ม) · widget key ขึ้นต้นด้วย goal_
 GOAL_RANGE_DEFAULT = (25, 200)              # % ของราคาตอนนี้
 GOAL_NOTE = ("ยังไม่คิด premium: ขา LEAPS = intrinsic เทียบจาก P₀ (เริ่มที่ 0 ที่ P₀ เหมือนเป้า) · "
-             "ขาหุ้นใช้ ln แบบ bot rebalance · หน่วยเป็น model ไม่ใช่ P/L ของบัญชี")
+             "ขาหุ้นใช้ ln แบบ bot rebalance · Payoff + Eₙ = Payoff + ส่วนเกินสะสมของ bot ถึงวันนี้ "
+             "(ค่าคงที่ทั้งเส้น ไม่รวม Eₙ ในอนาคต · แถบจางระหว่างสองเส้น = Eₙ) · หน่วยเป็น model ไม่ใช่ P/L ของบัญชี")
 
 
 def _goal_refresh_button() -> None:
@@ -1148,7 +1149,7 @@ def _render_goal(snap: dict, chains: dict, chain_issues: dict, now) -> None:
     inputs, _ = goal.goal_inputs(next(book for book in books if book.symbol == pick))
     at_now = goal.goal_at(inputs)
     leaps_w, cover = inputs.leaps_weight, inputs.coverage
-    cards = st.columns(6)
+    cards = st.columns(4) + st.columns(4)
     cards[0].metric("ราคาตอนนี้", f"{inputs.spot:,.2f}", help=f"P₀ ของ chain {inputs.p0:,.2f}")
     cards[1].metric("ขาหุ้น (% FIX_C)", f"{inputs.stock_weight:.1%}",
                     help=f"หุ้นจริง {inputs.shares:,.2f} × ราคาตอนนี้ ÷ FIX_C {inputs.fix_c:,.0f}")
@@ -1158,6 +1159,11 @@ def _render_goal(snap: dict, chains: dict, chain_issues: dict, now) -> None:
     cards[3].metric("ครอบคลุม FIX_C", "—" if cover is None else f"{cover:.1%}")
     cards[4].metric("Payoff ตอนนี้", f"{at_now['payoff']:+,.2f}", help=f"เป้าตอนนี้ {at_now['goal']:+,.2f}")
     cards[5].metric("ห่างจากเป้าตอนนี้", f"{at_now['gap']:+,.2f}")
+    no_e = "ไม่มี Eₙ ใน state ของ bot"
+    cards[6].metric("Eₙ สะสม (bot)", "—" if inputs.excess is None else f"{inputs.excess:+,.2f}",
+                    help="ส่วนเกินสะสมของ chain ถึงวันนี้ (Aₙ − R_basis)" if inputs.excess is not None else no_e)
+    cards[7].metric("Payoff + Eₙ ตอนนี้", "—" if at_now["payoff_e"] is None else f"{at_now['payoff_e']:+,.2f}",
+                    help=no_e if at_now["gap_e"] is None else f"ห่างจากเป้า + Eₙ {at_now['gap_e']:+,.2f}")
     lo, hi = _goal_range()
     theme = _streamlit_theme()
     df = goal.goal_curves(inputs, goal.goal_grid(inputs, lo, hi))
@@ -1166,11 +1172,13 @@ def _render_goal(snap: dict, chains: dict, chain_issues: dict, now) -> None:
                            title=f"{inputs.symbol} · Payoff = ขาหุ้น + ขา LEAPS เทียบเป้า",
                            subtitle=(f"FIX_C {inputs.fix_c:,.0f} · P₀ {inputs.p0:,.2f} · หุ้น {inputs.shares:,.2f} "
                                      f"+ LEAPS {inputs.option_text()} · ครอบคลุม "
-                                     f"{'—' if cover is None else f'{cover:.0%}'} · {_payoff_stamp(now)}"))
+                                     f"{'—' if cover is None else f'{cover:.0%}'} · Eₙ "
+                                     f"{'—' if inputs.excess is None else f'{inputs.excess:+,.2f}'} · "
+                                     f"{_payoff_stamp(now)}"))
     config = dict(goal.CHART_CONFIG, toImageButtonOptions=dict(goal.CHART_CONFIG["toImageButtonOptions"],
                                                                filename=f"goal_{inputs.symbol}"))
     st.plotly_chart(fig, theme=None, config=config, key="goal_chart")
-    st.markdown("**ห่างจากเป้า** = Payoff − เป้า (เส้น 0 = เป้า)")
+    st.markdown("**ห่างจากเป้า** = Payoff − เป้า และ Payoff + Eₙ − เป้า (เส้น 0 = เป้า)")
     st.plotly_chart(goal.gap_figure(df, inputs, theme=theme, x_start=x_start), theme=None, config=config,
                     key="goal_gap_chart")
     st.caption(GOAL_NOTE)

@@ -230,13 +230,16 @@ Payoff = **ขาหุ้น + ขา LEAPS** เทียบ **เป้า** 
 | `stock_leg` ขาหุ้น | y₁ | shares · spot · ln(x / p0) | ✅ |
 | `leaps_leg` ขา LEAPS | y₈ | Σ leaps_shares · [max(0, x − K) − max(0, p0 − K)] | ✅ |
 | `payoff` | y₃ | stock_leg + leaps_leg | — |
+| `payoff_e` Payoff + Eₙ | (④ ของแท็บ Payoff) | payoff + excess · `excess` = Eₙ สะสมของ bot ถึงวันนี้ | — |
 | `gap` ห่างจากเป้า | — | payoff − goal | — |
+| `gap_e` ห่างจากเป้า + Eₙ | — | payoff_e − goal | — |
 
 น้ำหนักจากสถานะจริง (วัดที่ราคาตอนนี้): `stock_weight = shares · spot / fix_c` ·
 `leaps_weight = Σ delta · leaps_shares · spot / fix_c` · `coverage = stock_weight + leaps_weight`
 (เท่ากับ exposure จริงของแท็บ Payoff)
 
-- `fix_c`, `p0` จาก chain ของ bot · `spot`, `shares`, strike, delta จาก Webull · `leaps_shares` = 100 × สัญญา
+- `fix_c`, `p0`, `excess` (Eₙ = Aₙ − R_basis) จาก chain ของ bot · Payoff + Eₙ เลื่อนทั้งเส้นด้วยค่าคงที่
+  (ไม่รวม Eₙ ในอนาคต) แถบจางระหว่าง Payoff กับ Payoff + Eₙ = Eₙ · ไม่มี Eₙ → ไม่มีเส้นนี้ · `spot`, `shares`, strike, delta จาก Webull · `leaps_shares` = 100 × สัญญา
 - ขา LEAPS เริ่มที่ 0 ที่ p0 (เทียบกับเป้าได้) และนับ LEAPS เป็นหุ้นเต็มเหนือ strike · ขาหุ้นใช้ ln แบบ bot rebalance
 - ครอบคลุม 100% และ spot = p0 → payoff ≥ เป้าทุกราคา (x − 1 ≥ ln x) · ความชันเท่ากันที่ p0
 - แท็บมีการ์ดน้ำหนัก, กราฟ 4 เส้น, กราฟห่างจากเป้า, สมการพร้อมค่าจริงแทนลงไป และตารางทุกตัว

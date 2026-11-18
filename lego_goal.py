@@ -9,7 +9,9 @@
     stock_leg   (y₁) ขาหุ้น           = shares · spot · ln(x / p0)
     leaps_leg   (y₈) ขา LEAPS         = Σ leaps_shares · [max(0, x − K) − max(0, p0 − K)]
     payoff      (y₃) Payoff          = stock_leg + leaps_leg
+    payoff_e         Payoff + Eₙ      = payoff + excess          excess = Eₙ สะสมของ bot ถึงวันนี้ (ค่าคงที่ทั้งเส้น)
     gap              ห่างจากเป้า      = payoff − goal
+    gap_e            ห่างจากเป้า + Eₙ = payoff_e − goal
 
 น้ำหนักจากสถานะจริง (วัดที่ราคาตอนนี้ spot):
 
@@ -17,7 +19,7 @@
     leaps_weight = Σ delta · leaps_shares · spot / fix_c
     coverage     = stock_weight + leaps_weight
 
-x = ราคาบนแกน · fix_c, p0 = chain ของ bot · spot, shares, strike, delta = Webull · leaps_shares = 100 × สัญญา
+x = ราคาบนแกน · fix_c, p0, excess = chain ของ bot · spot, shares, strike, delta = Webull · leaps_shares = 100 × สัญญา
 ขา LEAPS เริ่มที่ 0 ที่ p0 (เทียบกับเป้าได้) และนับ LEAPS เป็นหุ้นเต็มเหนือ strike ตามหลัก LEGO
 """
 from __future__ import annotations
@@ -33,12 +35,16 @@ import plotly.graph_objects as go
 
 from lego_charts import FONT_FAMILY, LINE, REFERENCE_DASH, theme_tokens
 
-GOAL_SCHEMA = 1
+GOAL_SCHEMA = 2                     # 2 = มี payoff_e (Payoff + Eₙ)
 PRICE = "price"
-LINE_KEYS = ("goal", "stock_leg", "leaps_leg", "payoff")
+LINE_KEYS = ("goal", "stock_leg", "leaps_leg", "payoff", "payoff_e")
+VALUE_KEYS = (*LINE_KEYS, "gap", "gap_e")
 NAMES = {"goal": "เป้า (FIX_C · ln)", "stock_leg": "ขาหุ้น", "leaps_leg": "ขา LEAPS",
-         "payoff": "Payoff = ขาหุ้น + ขา LEAPS", "gap": "ห่างจากเป้า"}
-SHORT = {"goal": "เป้า", "stock_leg": "หุ้น", "leaps_leg": "LEAPS", "payoff": "Payoff"}
+         "payoff": "Payoff = ขาหุ้น + ขา LEAPS", "payoff_e": "Payoff + Eₙ (bot)",
+         "gap": "ห่างจากเป้า", "gap_e": "ห่างจากเป้า + Eₙ"}
+SHORT = {"goal": "เป้า", "stock_leg": "หุ้น", "leaps_leg": "LEAPS", "payoff": "Payoff", "payoff_e": "Payoff+Eₙ"}
+END_LABELS = ("goal", "payoff", "payoff_e", "leaps_leg")      # ป้ายปลายเส้น ≤ 4 (ที่เหลือดูจาก legend)
+BAND_ALPHA = 0.12
 MIN_PCT = 1.0                       # ราคา 0 ทำให้ ln เป็น −∞ → ข้อมูลเริ่มที่ 1% ของราคาตอนนี้
 GRID_POINTS = 241
 STATUS = {"good": "#0ca30c", "critical": "#d03b3b"}   # dataviz status palette (คู่กับ ▲/▼ + ข้อความเสมอ)
@@ -64,6 +70,7 @@ class GoalInputs:
     spot: float
     shares: float
     calls: tuple[LeapsCall, ...] = ()
+    excess: float | None = None   # Eₙ สะสมของ bot (chain) · None = ไม่มีเส้น Payoff + Eₙ
 
     @property
     def stock_value(self) -> float:
@@ -98,6 +105,14 @@ class GoalInputs:
         return " + ".join(f"{c.leaps_shares / 100:g}×C{c.strike:g}" for c in self.calls) or "—"
 
 
+def _finite(value) -> float | None:
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) else None
+
+
 def _positive(value) -> float | None:
     try:
         out = float(value)
@@ -130,7 +145,8 @@ def goal_inputs(book) -> tuple[GoalInputs | None, str | None]:
                                    None if leg.delta is None else float(leg.delta), leg.expiry))
         else:
             return None, f"{symbol}: มี option ที่ไม่ใช่ long call (put หรือขาย) — แท็บนี้รองรับเฉพาะฝั่ง buy"
-    return GoalInputs(symbol, fix_c, p0, spot, shares, tuple(calls)), None
+    excess = _finite(getattr(chain, "excess", None))
+    return GoalInputs(symbol, fix_c, p0, spot, shares, tuple(calls), excess), None
 
 
 def goal_grid(inputs: GoalInputs, lo_pct: float, hi_pct: float, n: int = GRID_POINTS) -> np.ndarray:
@@ -149,13 +165,15 @@ def goal_curves(inputs: GoalInputs, prices: Iterable[float]) -> pd.DataFrame:
     for c in inputs.calls:
         leaps_leg = leaps_leg + c.leaps_shares * (np.maximum(0.0, x - c.strike) - max(0.0, inputs.p0 - c.strike))
     payoff = stock_leg + leaps_leg
+    payoff_e = payoff + (np.nan if inputs.excess is None else inputs.excess)
     return pd.DataFrame({PRICE: x, "goal": goal, "stock_leg": stock_leg, "leaps_leg": leaps_leg,
-                         "payoff": payoff, "gap": payoff - goal})
+                         "payoff": payoff, "payoff_e": payoff_e, "gap": payoff - goal, "gap_e": payoff_e - goal})
 
 
-def goal_at(inputs: GoalInputs, price: float | None = None) -> dict[str, float]:
+def goal_at(inputs: GoalInputs, price: float | None = None) -> dict[str, float | None]:
+    """ค่าทุกเส้นที่ราคาเดียว · payoff_e / gap_e เป็น None เมื่อไม่มี Eₙ"""
     row = goal_curves(inputs, [inputs.spot if price is None else price]).iloc[0]
-    return {key: float(row[key]) for key in (*LINE_KEYS, "gap")}
+    return {key: _finite(row[key]) for key in VALUE_KEYS}
 
 
 def goal_overview(books: Sequence) -> tuple[pd.DataFrame, list[str]]:
@@ -174,8 +192,13 @@ def goal_overview(books: Sequence) -> tuple[pd.DataFrame, list[str]]:
             "ขาหุ้น %": inputs.stock_weight * 100,
             "ขา LEAPS %": None if leaps is None else leaps * 100,
             "ครอบคลุม %": None if cover is None else cover * 100,
-            "Payoff ตอนนี้": now["payoff"], "เป้าตอนนี้": now["goal"], "ห่างจากเป้า": now["gap"]})
+            "Payoff ตอนนี้": now["payoff"], "เป้าตอนนี้": now["goal"], "ห่างจากเป้า": now["gap"],
+            "Eₙ (bot)": inputs.excess, "Payoff + Eₙ ตอนนี้": now["payoff_e"], "ห่างจากเป้า + Eₙ": now["gap_e"]})
     return pd.DataFrame(rows), issues
+
+
+def _fmt(value: float | None) -> str:
+    return "—" if value is None else f"{value:+,.2f}"
 
 
 def equation_text(inputs: GoalInputs, price: float | None = None) -> str:
@@ -212,6 +235,9 @@ def equation_text(inputs: GoalInputs, price: float | None = None) -> str:
         f"  leaps_leg = Σ leaps_shares · [max(0, x − K) − max(0, p0 − K)] = {leaps_terms} = {v['leaps_leg']:+,.2f}",
         f"  payoff    = stock_leg + leaps_leg = {v['payoff']:+,.2f}",
         f"  gap       = payoff − goal = {v['gap']:+,.2f}",
+        f"  excess    = Eₙ สะสมของ bot (chain) = {_fmt(inputs.excess)}",
+        f"  payoff_e  = payoff + excess = {_fmt(v['payoff_e'])}",
+        f"  gap_e     = payoff_e − goal = {_fmt(v['gap_e'])}",
         "",
         "LEAPS ที่เป้าต้องการ ณ p0 = (fix_c − shares · spot) / p0 = "
         f"({inputs.fix_c:,.0f} − {inputs.stock_value:,.2f}) / {inputs.p0:,.4g} = {inputs.needed_leaps_shares:,.1f} หุ้น"
@@ -297,35 +323,42 @@ def _spread(values: Sequence[float], gap: float) -> list[float]:
 
 def goal_figure(df: pd.DataFrame, inputs: GoalInputs, *, theme: str | None = None, title: str | None = None,
                 subtitle: str | None = None, x_start: float | None = None, height: int = 560) -> go.Figure:
-    """เป้า (ประ) · ขาหุ้น · ขา LEAPS · Payoff (หนา) + เส้นตั้ง K / P₀ / ตอนนี้ + ป้ายค่าตอนนี้"""
+    """เป้า (ประ) · ขาหุ้น · ขา LEAPS · Payoff (หนา) · Payoff + Eₙ (แถบจางระหว่างสองเส้น = Eₙ)
+    + เส้นตั้ง K / P₀ / ตอนนี้ + ป้ายค่าตอนนี้ · ไม่มี Eₙ → ไม่มีเส้น Payoff + Eₙ"""
     tok = theme_tokens(theme)
+    blue = tok["series"][0]
     styles = {"goal": dict(color=tok["text_secondary"], width=LINE["reference"] + 0.5, dash=REFERENCE_DASH),
               "stock_leg": dict(color=tok["series"][2], width=LINE["excess"] + 0.5),
               "leaps_leg": dict(color=tok["series"][1], width=LINE["excess"] + 0.5),
-              "payoff": dict(color=tok["text_primary"], width=LINE["total"] + 2.0)}
+              "payoff": dict(color=tok["text_primary"], width=LINE["total"] + 2.0),
+              "payoff_e": dict(color=blue, width=LINE["excess"] + 1.0)}
+    keys = [k for k in LINE_KEYS if k != "payoff_e" or inputs.excess is not None]
     x = df[PRICE].to_numpy(dtype=float)
     fig = go.Figure()
-    for rank, key in enumerate(LINE_KEYS):
+    for rank, key in enumerate(keys):         # payoff_e ต่อจาก payoff เสมอ → tonexty = แถบ Eₙ
+        band = dict(fill="tonexty", fillcolor=_rgba(blue, BAND_ALPHA)) if key == "payoff_e" else {}
         fig.add_trace(go.Scatter(x=x, y=df[key], name=NAMES[key], mode="lines", line=styles[key],
-                                 legendrank=1000 + rank,
+                                 legendrank=1000 + rank, **band,
                                  hovertemplate=f"<b>%{{y:,.2f}}</b> USD  {NAMES[key]}<extra></extra>"))
     lo, hi = float(x.min()), float(x.max())
     if x_start is not None:
         lo = min(lo, float(x_start))
-    y_range = _y_range([df[k].to_numpy(dtype=float) for k in LINE_KEYS])
+    y_range = _y_range([df[k].to_numpy(dtype=float) for k in keys])
     _markers(fig, tok, inputs, lo, hi)
     now = goal_at(inputs)
     fig.add_trace(go.Scatter(x=[inputs.spot], y=[now["payoff"]], mode="markers", showlegend=False,
                              hoverinfo="skip", marker=dict(size=10, color=tok["surface"],
                                                            line=dict(color=tok["text_primary"], width=2))))
-    fig.add_annotation(x=inputs.spot, y=now["payoff"], text=(f"ตอนนี้: Payoff <b>{now['payoff']:+,.0f}</b> · "
-                                                             f"เป้า {now['goal']:+,.0f} · ห่าง {now['gap']:+,.0f}"),
+    with_e = "" if now["payoff_e"] is None else f" · +Eₙ {now['payoff_e']:+,.0f}"
+    fig.add_annotation(x=inputs.spot, y=now["payoff"],
+                       text=(f"ตอนนี้: Payoff <b>{now['payoff']:+,.0f}</b>{with_e} · "
+                             f"เป้า {now['goal']:+,.0f} · ห่าง {now['gap']:+,.0f}"),
                        showarrow=True, arrowhead=0, arrowwidth=1, arrowcolor=tok["axis"], ax=120, ay=84,
                        bgcolor=tok["tooltip"], bordercolor=tok["grid"], borderwidth=1, borderpad=3,
                        font=dict(family=FONT_FAMILY, size=12, color=tok["text_primary"]))
     fig.update_layout(**_layout(tok, height=height, title=title, subtitle=subtitle, y_title="USD (model)",
                                 x_range=[lo, hi], y_range=y_range))
-    ends = [(SHORT[k], float(df[k].iloc[-1])) for k in LINE_KEYS]
+    ends = [(SHORT[k], float(df[k].iloc[-1])) for k in END_LABELS if k in keys]
     gap = (y_range[1] - y_range[0]) * 0.06
     for (label, value), y in zip(ends, _spread([v for _, v in ends], gap)):
         fig.add_annotation(x=hi, y=y, text=f"{label} <b>{value:+,.0f}</b>", showarrow=False, xanchor="left",
@@ -334,17 +367,22 @@ def goal_figure(df: pd.DataFrame, inputs: GoalInputs, *, theme: str | None = Non
 
 
 def gap_figure(df: pd.DataFrame, inputs: GoalInputs, *, theme: str | None = None, x_start: float | None = None,
-               height: int = 320) -> go.Figure:
-    """ห่างจากเป้า = Payoff − เป้า · เส้น 0 = เป้า · โซนจาง ▲ เหนือเป้า / ▼ ใต้เป้า (สี status คู่ข้อความ)"""
+               height: int = 340) -> go.Figure:
+    """ห่างจากเป้า = Payoff − เป้า (+ เส้นรวม Eₙ) · เส้น 0 = เป้า · โซนจาง ▲ เหนือเป้า / ▼ ใต้เป้า (สี status คู่ข้อความ)"""
     tok = theme_tokens(theme)
     x = df[PRICE].to_numpy(dtype=float)
-    fig = go.Figure(go.Scatter(x=x, y=df["gap"], name=NAMES["gap"], mode="lines", showlegend=False,
-                               line=dict(color=tok["text_primary"], width=LINE["total"] + 0.5),
-                               hovertemplate=f"<b>%{{y:,.2f}}</b> USD  {NAMES['gap']}<extra></extra>"))
+    keys = ["gap"] + (["gap_e"] if inputs.excess is not None else [])
+    styles = {"gap": dict(color=tok["text_primary"], width=LINE["total"] + 0.5),
+              "gap_e": dict(color=tok["series"][0], width=LINE["excess"] + 1.0)}
+    fig = go.Figure()
+    for key in keys:
+        fig.add_trace(go.Scatter(x=x, y=df[key], name=NAMES[key], mode="lines", showlegend=len(keys) > 1,
+                                 line=styles[key],
+                                 hovertemplate=f"<b>%{{y:,.2f}}</b> USD  {NAMES[key]}<extra></extra>"))
     lo, hi = float(x.min()), float(x.max())
     if x_start is not None:
         lo = min(lo, float(x_start))
-    y_range = _y_range([df["gap"].to_numpy(dtype=float)])
+    y_range = _y_range([df[k].to_numpy(dtype=float) for k in keys])
     _markers(fig, tok, inputs, lo, hi)
     for y0, y1, color, text, anchor, shift in ((0, y_range[1], STATUS["good"], "▲ เหนือเป้า", "bottom", 2),
                                                (y_range[0], 0, STATUS["critical"], "▼ ใต้เป้า", "top", -2)):
@@ -355,6 +393,6 @@ def gap_figure(df: pd.DataFrame, inputs: GoalInputs, *, theme: str | None = None
                                font=dict(family=FONT_FAMILY, size=11, color=tok["text_secondary"]))
     layout = _layout(tok, height=height, title=None, subtitle=None, y_title="ห่างจากเป้า (USD)",
                      x_range=[lo, hi], y_range=y_range)
-    layout["margin"] = dict(l=8, r=24, t=24, b=8)
+    layout["margin"] = dict(l=8, r=24, t=56 if len(keys) > 1 else 24, b=8)
     fig.update_layout(**layout)
     return fig
