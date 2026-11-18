@@ -1,6 +1,6 @@
 """streamlit_app.py — Dashboard (read-only) อ่านจาก Firebase RTDB + Rebalancing 101
 
-5 แท็บ:
+6 แท็บ:
   📊 Live Dashboard   — อ่าน Firebase ครั้งเดียวต่อการโหลดหน้า (lego_live_data.Snapshot) แล้วแสดงใน
                         st.fragment: ตัวเลือก Chain (จำไว้ใน URL ?chain=) → หัวข้อ "หุ้น · Live" พร้อมสถานะ
                         สด/ค้าง/ผิดพลาด เวลาอัปเดต และปุ่มรีเฟรช → ตัวกรองวัน (UTC) → แท็บย่อย
@@ -16,6 +16,8 @@
                         Rebalancing 101 + Rebalancing Playground — ไม่เรียก Firebase
   📐 Payoff           — เส้น payoff จาก position จริงใน Webull (lego_payoff.py + lego_webull_read.py: GET อย่างเดียว
                         4 path ไม่ส่ง order ไม่สร้าง token) + มุมมอง LEGO model ledger จาก webull_lego_state ของ PROD
+  🎯 Goal             — Payoff = ขาหุ้น + ขา LEAPS เทียบเป้า FIX_C·ln(x/P₀) จากสถานะจริง (lego_goal.py แยกโมดูล
+                        ใช้ข้อมูลชุดเดียวกับ 📐 Payoff ไม่เรียก Webull เพิ่ม · ยังไม่คิด premium)
   ⚡ Cheat Sheet       — แท็บย่อย 📝 Summary: สรุป 10 ข้อ + ประโยคเดียว (cheat_sheet/summary.md)
                         และ 🔀 Diagrams: แผนภาพ Mermaid (.mmd ใน cheat_sheet/): main rebalancing,
                         rollover (beta += (Fix_c − Fix_c_new) * ln(P_acted / P₀)) และ Option Scale
@@ -110,6 +112,12 @@ if getattr(_lego_webull_read, "SNAPSHOT_SCHEMA", 0) < 2:
     _lego_webull_read = importlib.reload(_lego_webull_read)
 
 from lego_webull_read import WebullReadError, fetch_account_snapshot, redact
+
+# แท็บ 🎯 Goal — โมดูลแยก (ไม่ import lego_payoff) · reload guard แบบเดียวกัน
+import lego_goal as goal
+
+if getattr(goal, "GOAL_SCHEMA", 0) < 2:            # 2 = มีเส้น Payoff + Eₙ
+    goal = importlib.reload(goal)
 
 # Web Apps: คู่มือ/playground แบบ HTML ล้วน (self-contained) แสดงใน iframe ผ่าน
 # components.html — ชุดนี้คัดลอกมาจากแท็บ "🌐 Web Apps" ของ pages/Manual.py (leg-code)
@@ -1090,6 +1098,126 @@ def render_payoff_tab() -> None:
     payoff_panel(snap, chains, chain_issues)
 
 
+# ---------------------------------------------------------------- 🎯 Goal (แท็บใหม่)
+# Payoff = ขาหุ้น + ขา LEAPS เทียบเป้า FIX_C·ln(x/P₀) จากสถานะจริง · สูตรและกราฟทั้งหมดอยู่ใน lego_goal
+# ใช้ cache ชุดเดียวกับ 📐 Payoff (ไม่เรียก Webull / Firebase เพิ่ม) · widget key ขึ้นต้นด้วย goal_
+GOAL_RANGE_DEFAULT = (25, 200)              # % ของราคาตอนนี้
+GOAL_NOTE = ("ยังไม่คิด premium: ขา LEAPS = intrinsic เทียบจาก P₀ (เริ่มที่ 0 ที่ P₀ เหมือนเป้า) · "
+             "ขาหุ้นใช้ ln แบบ bot rebalance · Payoff + Eₙ = Payoff + ส่วนเกินสะสมของ bot ถึงวันนี้ "
+             "(ค่าคงที่ทั้งเส้น ไม่รวม Eₙ ในอนาคต · แถบจางระหว่างสองเส้น = Eₙ) · หน่วยเป็น model ไม่ใช่ P/L ของบัญชี")
+
+
+def _goal_refresh_button() -> None:
+    """ปุ่มของแท็บนี้เอง (key ไม่ชนแท็บ Payoff) · cooldown ร่วมกับแท็บ Payoff กัน rate limit"""
+    now = pd.Timestamp.now(tz="UTC").timestamp()
+    wait = PAYOFF_COOLDOWN_S - (now - float(st.session_state.get("payoff_refreshed_at", 0.0)))
+    if st.button("⟳ รีเฟรช", key="goal_refresh", disabled=wait > 0,
+                 help=(f"รีเฟรชได้อีกใน {wait:.0f} วินาที" if wait > 0
+                       else f"ข้อมูลเก็บไว้ {PAYOFF_TTL_S // 60} นาที กดเพื่อดึงใหม่")):
+        st.session_state["payoff_refreshed_at"] = now
+        _webull_snapshot.clear()
+        _payoff_lego_state.clear()
+        st.rerun()
+
+
+def _goal_range() -> tuple[int, int]:
+    value = st.session_state.get("goal_range")
+    if not (isinstance(value, (list, tuple)) and len(value) == 2):
+        st.session_state["goal_range"] = GOAL_RANGE_DEFAULT
+    lo, hi = st.slider("ช่วงราคา (% ของราคาตอนนี้)", 0, 300, step=5, key="goal_range",
+                       help="ราคา 0 ทำให้ ln เป็น −∞ ข้อมูลจึงเริ่มที่ 1% ของราคาตอนนี้")
+    return lo, hi
+
+
+def _render_goal(snap: dict, chains: dict, chain_issues: dict, now) -> None:
+    head, action = st.columns([6, 1], vertical_alignment="center")
+    with head:
+        st.subheader("🎯 Goal · Payoff เทียบเป้า FIX_C")
+        st.caption(_payoff_status_line(snap) + " · อ่านอย่างเดียว · ยังไม่คิด premium")
+    with action:
+        _goal_refresh_button()
+    books, notes = payoff.build_books(snap, chains, chain_issues, now)
+    skipped = [n for n in notes if n.startswith(payoff.SKIP_PREFIX)]
+    table, issues = goal.goal_overview(books)
+    if table.empty:
+        st.info("ยังไม่มีตัวที่คำนวณได้ (ดูเหตุผลด้านล่าง)" if books else "ไม่มี position ในบัญชีตอนนี้")
+        _payoff_notes(issues + skipped)
+        return
+    symbols = list(table["ตัว"])
+    _payoff_choice("goal_symbol", symbols, symbols[0])
+    pick = st.segmented_control("ตัว", symbols, key="goal_symbol") or symbols[0]
+    inputs, _ = goal.goal_inputs(next(book for book in books if book.symbol == pick))
+    at_now = goal.goal_at(inputs)
+    leaps_w, cover = inputs.leaps_weight, inputs.coverage
+    cards = st.columns(4) + st.columns(4)
+    cards[0].metric("ราคาตอนนี้", f"{inputs.spot:,.2f}", help=f"P₀ ของ chain {inputs.p0:,.2f}")
+    cards[1].metric("ขาหุ้น (% FIX_C)", f"{inputs.stock_weight:.1%}",
+                    help=f"หุ้นจริง {inputs.shares:,.2f} × ราคาตอนนี้ ÷ FIX_C {inputs.fix_c:,.0f}")
+    cards[2].metric("ขา LEAPS (% FIX_C)", "—" if leaps_w is None else f"{leaps_w:.1%}",
+                    help=f"{inputs.option_text()} · Σ delta × 100 × สัญญา × ราคาตอนนี้ ÷ FIX_C"
+                         + (" · ไม่มี delta ของ LEAPS บางขา" if leaps_w is None else ""))
+    cards[3].metric("ครอบคลุม FIX_C", "—" if cover is None else f"{cover:.1%}")
+    cards[4].metric("Payoff ตอนนี้", f"{at_now['payoff']:+,.2f}", help=f"เป้าตอนนี้ {at_now['goal']:+,.2f}")
+    cards[5].metric("ห่างจากเป้าตอนนี้", f"{at_now['gap']:+,.2f}")
+    no_e = "ไม่มี Eₙ ใน state ของ bot"
+    cards[6].metric("Eₙ สะสม (bot)", "—" if inputs.excess is None else f"{inputs.excess:+,.2f}",
+                    help="ส่วนเกินสะสมของ chain ถึงวันนี้ (Aₙ − R_basis)" if inputs.excess is not None else no_e)
+    cards[7].metric("Payoff + Eₙ ตอนนี้", "—" if at_now["payoff_e"] is None else f"{at_now['payoff_e']:+,.2f}",
+                    help=no_e if at_now["gap_e"] is None else f"ห่างจากเป้า + Eₙ {at_now['gap_e']:+,.2f}")
+    lo, hi = _goal_range()
+    theme = _streamlit_theme()
+    df = goal.goal_curves(inputs, goal.goal_grid(inputs, lo, hi))
+    x_start = inputs.spot * lo / 100
+    fig = goal.goal_figure(df, inputs, theme=theme, x_start=x_start,
+                           title=f"{inputs.symbol} · Payoff = ขาหุ้น + ขา LEAPS เทียบเป้า",
+                           subtitle=(f"FIX_C {inputs.fix_c:,.0f} · P₀ {inputs.p0:,.2f} · หุ้น {inputs.shares:,.2f} "
+                                     f"+ LEAPS {inputs.option_text()} · ครอบคลุม "
+                                     f"{'—' if cover is None else f'{cover:.0%}'} · Eₙ "
+                                     f"{'—' if inputs.excess is None else f'{inputs.excess:+,.2f}'} · "
+                                     f"{_payoff_stamp(now)}"))
+    config = dict(goal.CHART_CONFIG, toImageButtonOptions=dict(goal.CHART_CONFIG["toImageButtonOptions"],
+                                                               filename=f"goal_{inputs.symbol}"))
+    st.plotly_chart(fig, theme=None, config=config, key="goal_chart")
+    st.markdown("**ห่างจากเป้า** = Payoff − เป้า และ Payoff + Eₙ − เป้า (เส้น 0 = เป้า)")
+    st.plotly_chart(goal.gap_figure(df, inputs, theme=theme, x_start=x_start), theme=None, config=config,
+                    key="goal_gap_chart")
+    st.caption(GOAL_NOTE)
+    with st.expander("สมการ (ชื่อตัวแปร + ค่าจริงที่ราคาตอนนี้)", expanded=True):
+        st.code(goal.equation_text(inputs), language=None)
+    with st.expander("ทุกตัว (ค่าที่ราคาตอนนี้)"):
+        st.dataframe(table, hide_index=True, column_config={
+            col: st.column_config.NumberColumn(format="%.2f") for col in table.columns if col not in ("ตัว", "LEAPS")})
+    _payoff_notes(issues + skipped)
+
+
+@st.fragment
+def goal_panel(snap: dict, chains: dict, chain_issues: dict) -> None:
+    """เนื้อหาแท็บ Goal — กดเลือกในแท็บ rerun แค่ส่วนนี้ (ไม่เรียก Webull / Firebase ซ้ำ)"""
+    try:
+        _render_goal(snap, chains, chain_issues, pd.Timestamp.now(tz="UTC").to_pydatetime())
+    except Exception as exc:                 # ไม่พาแท็บอื่นล้ม
+        st.error(f"แสดงแท็บ Goal ไม่ได้ ({type(exc).__name__}: {redact(exc)})")
+
+
+def render_goal_tab() -> None:
+    if not _webull_ready():
+        st.info("ตั้ง st.secrets ของ Webull ก่อน (เหมือนแท็บ 📐 Payoff) จึงจะเห็น Payoff เทียบเป้าจาก position จริง")
+        return
+    try:
+        with st.spinner("กำลังดึง position จาก Webull"):
+            snap = _webull_snapshot(_webull_fingerprint())
+    except Exception as exc:     # WebullReadError = ข้อความไทย (redact แล้ว) · อื่น ๆ = ชนิดเท่านั้น
+        st.error(f"ดึงข้อมูล Webull ไม่ได้ — {exc}" if isinstance(exc, WebullReadError)
+                 else f"ดึงข้อมูล Webull ไม่ได้ ({type(exc).__name__})")
+        return
+    try:
+        chains, chain_issues = _payoff_lego_state()
+    except Exception as exc:     # ไม่มี FIX_C / P₀ = คำนวณไม่ได้ (fail closed) + เหตุผล
+        chains, chain_issues = {}, {}
+        st.caption(f"ⓘ อ่าน state ของ bot ไม่ได้ ({type(exc).__name__}) — ไม่มี FIX_C และ P₀")
+    goal_panel(snap, chains, chain_issues)
+
+
 def main():
     st.set_page_config(page_title="LEGO PROD", layout="wide")
     st.title("🧬 LEGO Shannon Demon: PROD")
@@ -1104,9 +1232,9 @@ def main():
                                  key="database") == DATABASE_PAPER
     render_prod_banner(paper)
 
-    # 📐 Payoff อยู่ก่อน ⚡ Cheat Sheet: เทสต์เดิมกำหนดให้ Cheat Sheet เป็นแท็บสุดท้าย
-    tab_live, tab_101, tab_web, tab_payoff, tab_cheat = st.tabs(
-        ["📊 Live Dashboard", "🎓 Rebalancing 101", "🌐 Web Apps", "📐 Payoff", "⚡ Cheat Sheet"])
+    # 📐 Payoff / 🎯 Goal อยู่ก่อน ⚡ Cheat Sheet: เทสต์เดิมกำหนดให้ Cheat Sheet เป็นแท็บสุดท้าย
+    tab_live, tab_101, tab_web, tab_payoff, tab_goal, tab_cheat = st.tabs(
+        ["📊 Live Dashboard", "🎓 Rebalancing 101", "🌐 Web Apps", "📐 Payoff", "🎯 Goal", "⚡ Cheat Sheet"])
     with tab_live:
         render_live_dashboard(paper)
     with tab_101:
@@ -1115,6 +1243,8 @@ def main():
         render_web_apps()
     with tab_payoff:
         render_payoff_tab()
+    with tab_goal:
+        render_goal_tab()
     with tab_cheat:
         render_cheat_sheets()
 

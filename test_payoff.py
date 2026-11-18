@@ -938,7 +938,7 @@ def test_the_tab_draws_real_positions_and_the_lego_view(monkeypatch):
     app = payoff_app(monkeypatch)
     app.run(timeout=30)
     assert not app.exception and not app.error, [e.value for e in app.error]
-    assert len(app.get("plotly_chart")) == 2                         # 101 + Payoff
+    assert len(app.get("plotly_chart")) == 4                         # 101 + Payoff + Goal (2 กราฟ)
     labels = {m.label for m in app.metric}
     assert {"S₀ (USD)", "P/L ตอนนี้", "หุ้นจริง", "FIX_C (bot)", "exposure จริง"} <= labels
     assert next(m for m in app.metric if m.label == "exposure จริง").value == "84.0%"
@@ -950,7 +950,7 @@ def test_the_tab_draws_real_positions_and_the_lego_view(monkeypatch):
     assert not app.exception and not app.error
     lego = {m.label: m.value for m in app.metric}
     assert lego["Aₙ สะสม"] == "-100.00" and lego["R_basis"] == "-120.00" and lego["Eₙ สะสม"] == "+20.00"
-    assert len(app.tabs) == 7                                        # 5 แท็บ + Summary/Diagrams
+    assert len(app.tabs) == 8                                        # 6 แท็บ + Summary/Diagrams
 
 
 def payoff_view_lego() -> str:
@@ -1004,7 +1004,7 @@ def test_the_eleven_equation_view(monkeypatch):
     expected = 1500 * math.log(9.0 / 10.0) * 0.58 + (max(0.0, 9.0 - 7.0) * 100 - 490)     # y₅ + y₈
     assert metrics["y₃ ที่ราคาตอนนี้"] == f"{expected:+,.2f}" == "-381.66"
     assert metrics["Option"] == "1×C7"
-    assert len(app.get("plotly_chart")) == 2                                    # 101 + แบบ 11 สมการ
+    assert len(app.get("plotly_chart")) == 4                                    # 101 + แบบ 11 สมการ + Goal 2
     assert any(c.value.startswith("สมการที่ 3 (Net): y₃ = Σ(เส้นที่ Active)") for c in app.caption)
 
 
@@ -1013,14 +1013,14 @@ def test_a_webull_error_stays_inside_the_tab(monkeypatch):
     app.run(timeout=30)
     assert not app.exception
     assert [e.value for e in app.error] == ["ดึงข้อมูล Webull ไม่ได้ — token ใช้ไม่ได้ (HTTP 401 X) — "
-                                            "แท็บนี้ไม่สร้าง token ใหม่"]
+                                            "แท็บนี้ไม่สร้าง token ใหม่"] * 2      # 📐 Payoff + 🎯 Goal
     assert len(app.tabs) >= 7 and len(app.number_input) == 6          # แท็บอื่นยังอยู่ครบ
 
 
 def test_an_unexpected_error_shows_only_its_type(monkeypatch):
     app = payoff_app(monkeypatch, error=RuntimeError(f"leak {FAKE_TOKEN}"))
     app.run(timeout=30)
-    assert [e.value for e in app.error] == ["ดึงข้อมูล Webull ไม่ได้ (RuntimeError)"]
+    assert [e.value for e in app.error] == ["ดึงข้อมูล Webull ไม่ได้ (RuntimeError)"] * 2   # 📐 Payoff + 🎯 Goal
 
 
 def test_without_bot_state_line_three_is_hidden_with_a_reason(monkeypatch):
