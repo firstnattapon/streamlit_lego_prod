@@ -288,8 +288,8 @@ def test_the_goal_tab_shows_weights_charts_and_equations(monkeypatch):
     assert any("stock_weight = shares · spot / fix_c" in c.value for c in app.code)
     picker = app.button_group(key="goal_symbol")
     assert picker.value == "AAA" and list(picker.options) == ["AAA"]  # ตัวเดียว → ไม่มีรวมพอร์ต
-    assert [t.label for t in app.tabs][:5] == ["📊 Live Dashboard", "🎓 Rebalancing 101", "🌐 Web Apps", "🎯 Goal",
-                                               "⚡ Cheat Sheet"]          # ไม่มีแท็บ 📐 Payoff
+    assert [t.label for t in app.tabs][:6] == ["📊 Live Dashboard", "🎓 Rebalancing 101", "🌐 Web Apps", "🎯 Goal",
+                                               "🧪 ประวัติเป้า", "⚡ Cheat Sheet"]          # ไม่มีแท็บ 📐 Payoff
     assert len(app.get("plotly_chart")) == 3                          # 101 + Goal (กราฟหลัก + ห่างจากเป้า)
 
 

@@ -540,8 +540,10 @@ def snapshot(**extra) -> dict:
             "notes": [], **extra}
 
 
-def goal_app(monkeypatch, *, snap=None, error=None, firebase=True, state=None, rows=None) -> AppTest:
-    """แอปจริงกับ Webull / Firebase ปลอม · state/rows: chain_key → state / แถวล่าสุด (ค่าเริ่มต้น = fixture AAA)"""
+def goal_app(monkeypatch, *, snap=None, error=None, firebase=True, state=None, rows=None,
+             rows_node=None) -> AppTest:
+    """แอปจริงกับ Webull / Firebase ปลอม · state/rows: chain_key → state / แถวล่าสุด (ค่าเริ่มต้น = fixture AAA)
+    · rows_node: ทั้ง node ``webull_lego_rows`` (แท็บประวัติเป้าอ่าน · ค่าเริ่มต้นว่าง)"""
     def fake_fetch(*args, **kwargs):
         if error is not None:
             raise error
@@ -551,7 +553,7 @@ def goal_app(monkeypatch, *, snap=None, error=None, firebase=True, state=None, r
     secrets = dict(WEBULL_SECRETS)
     if firebase:
         state, rows = state or STATE, rows or ROWS
-        payloads = {"webull_lego_state": state, "webull_lego_rows": {}, "webull_lego_order_audit": {}}
+        payloads = {"webull_lego_state": state, "webull_lego_rows": rows_node or {}, "webull_lego_order_audit": {}}
         payloads.update({f"webull_lego_rows/{pointer['last_run_id']}": rows[key] for key, pointer in state.items()})
 
         class _Reference:
@@ -599,13 +601,13 @@ def test_a_webull_error_stays_inside_the_tab(monkeypatch):
     app.run(timeout=30)
     assert not app.exception
     assert [e.value for e in app.error] == ["ดึงข้อมูล Webull ไม่ได้ — token ใช้ไม่ได้ (HTTP 401 X) — "
-                                            "แท็บนี้ไม่สร้าง token ใหม่"]
+                                            "แท็บนี้ไม่สร้าง token ใหม่"] * 2      # 🎯 Goal + 🧪 ประวัติเป้า
     assert len(app.tabs) >= 7 and len(app.number_input) == 6          # แท็บอื่นยังอยู่ครบ
 
 
 def test_an_unexpected_error_shows_only_its_type(monkeypatch):
     app = goal_app(monkeypatch, error=RuntimeError(f"leak {FAKE_TOKEN}"))
     app.run(timeout=30)
-    assert [e.value for e in app.error] == ["ดึงข้อมูล Webull ไม่ได้ (RuntimeError)"]
+    assert [e.value for e in app.error] == ["ดึงข้อมูล Webull ไม่ได้ (RuntimeError)"] * 2   # 🎯 Goal + 🧪 ประวัติเป้า
 
 
