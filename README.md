@@ -59,7 +59,7 @@ FIREBASE_DB_URL_PAPER = "https://lego-firebase-paper.asia-southeast1.firebasedat
 
 ## ไฟล์หลัก
 
-- `streamlit_app.py` — หน้า Live Dashboard, Rebalancing 101, Web Apps, Goal และ Cheat Sheet
+- `streamlit_app.py` — หน้า Live Dashboard, Rebalancing 101, Web Apps, Goal, ประวัติเป้า (ทดสอบ) และ Cheat Sheet
 - `web_apps/` — คู่มือ/playground แบบ HTML ล้วน แสดงใน iframe ผ่าน `components.html`
   (รายละเอียดด้านล่าง)
 - `cheat_sheet/` — แผนภาพ Mermaid `.mmd` + ภาพ PNG ที่ render ไว้ + `summary.md` (สรุป 10 ข้อ + ประโยคเดียว) ·
@@ -75,6 +75,8 @@ FIREBASE_DB_URL_PAPER = "https://lego-firebase-paper.asia-southeast1.firebasedat
 - `lego_webull_read.py` — อ่าน position + quote จาก Webull OpenAPI **อ่านอย่างเดียว** (GET 4 path, ไม่ส่ง order,
   ไม่สร้าง token, ไม่เขียนไฟล์ — พิสูจน์ใน `test_positions.py`)
 - `lego_goal.py` — สูตรและกราฟของแท็บ Goal (แยกโมดูล: ไม่ import `lego_positions` / streamlit — `test_goal.py`)
+- `lego_goal_history.py` — แท็บประวัติเป้า (ทดสอบ): ห่างจากเป้า + Eₙ ตามเวลาจากแถวเก่าของ bot (ใช้นิยามของ
+  `lego_goal` · ไม่ import streamlit — `test_goal_history.py`)
 - `requirements.txt` — dependency ที่ pin แล้ว
 - `docs/` — คู่มือและแผนการเรียนรู้เพิ่มเติม
 
@@ -209,6 +211,21 @@ key ชุดนี้ส่ง order ได้ แท็บนี้จึง�
   และเขียน `conf/token.txt` — แท็บนี้ไม่สร้าง/ต่ออายุ token และไม่เขียนไฟล์ใด ๆ
 - log ของ SDK (ซึ่งพิมพ์ header ที่มี token ตอน Webull ตอบ error) ถูกปิดไม่ให้ขึ้น log ของแอป · ข้อความ error ปิดค่าลับเป็น `***`
   · ถ้าตั้ง `WEBULL_API_DEBUG` แท็บจะไม่ทำงาน
+
+## แท็บ 🧪 ประวัติเป้า (ทดสอบ)
+
+แท็บแยกสำหรับทดสอบ (ไม่แก้แท็บ 🎯 Goal): **ห่างจากเป้า + Eₙ** และ **Eₙ สะสม** ตามเวลา จากแถวเก่าของ bot
+(`webull_lego_rows` ของ chain ปัจจุบันของแต่ละตัว) — เห็นว่าช่องว่างกับเป้าแคบลงหรือกว้างขึ้น และ Eₙ สะสมเร็วแค่ไหน
+
+- แต่ละจุด = ค่าที่แท็บ 🎯 Goal จะแสดง ณ เวลานั้น: ราคา Pₙ, หุ้นจริง (`real_holdings`), LEAPS (`leaps_shares`) และ Eₙ
+  ของแถวนั้น · FIX_C / P₀ ของ chain ปัจจุบัน · strike ใช้ของ LEAPS ใน Webull ตอนนี้ (แถวเก่าไม่เก็บ strike · แถวที่มี LEAPS
+  แต่ตอนนี้ไม่มี → ไม่มีค่า) · ยังไม่คิด premium
+- การ์ด: ห่างจากเป้า + Eₙ ล่าสุด (เทียบ 7 วันก่อน) · ช่องว่างกับเป้า (|ห่างจากเป้า + Eₙ|) แคบลง/กว้างขึ้น · Eₙ สะสมล่าสุด ·
+  Eₙ ต่อวัน (7 วัน · ทั้ง chain ใน help) — เทียบกับแถวล่าสุดที่เก่ากว่า 7 วัน (ไม่มี → แถวแรก)
+- กราฟ: ห่างจากเป้า + Eₙ (ห่างจากเป้าไม่รวม Eₙ คลิก legend · เส้น 0 = เป้า) และ Eₙ สะสม · แกนเวลาซ่อนเสาร์–อาทิตย์และ
+  21:00–13:00 UTC (ตลาดปิด) · ตารางรายวัน (แถวสุดท้ายของแต่ละวัน + Eₙ ที่เพิ่มในวัน)
+- รวมพอร์ต: แต่ละตัวใช้ค่าล่าสุดของตัวเองจนกว่าจะมีแถวใหม่ แล้วรวมกัน (เริ่มเมื่อทุกตัวมีแถวแล้ว)
+- อ่าน `webull_lego_rows` ทั้ง node อย่างมาก 5 นาทีครั้ง (ปุ่มรีเฟรช) + Webull ชุดเดียวกับแท็บ 🎯 Goal
 
 ## แท็บ Live Dashboard
 

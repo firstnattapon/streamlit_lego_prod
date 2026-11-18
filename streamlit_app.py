@@ -1,6 +1,6 @@
 """streamlit_app.py — Dashboard (read-only) อ่านจาก Firebase RTDB + Rebalancing 101
 
-5 แท็บ:
+6 แท็บ:
   📊 Live Dashboard   — อ่าน Firebase ครั้งเดียวต่อการโหลดหน้า (lego_live_data.Snapshot) แล้วแสดงใน
                         st.fragment: ตัวเลือก Chain (จำไว้ใน URL ?chain=) → หัวข้อ "หุ้น · Live" พร้อมสถานะ
                         สด/ค้าง/ผิดพลาด เวลาอัปเดต และปุ่มรีเฟรช → ตัวกรองวัน (UTC) → แท็บย่อย
@@ -17,6 +17,7 @@
   🎯 Goal             — Payoff = ขาหุ้น + ขา LEAPS (+ Eₙ ของ bot) เทียบเป้า FIX_C·ln(x/P₀) จากสถานะจริง ต่อตัว
                         และรวมพอร์ต (สูตร/กราฟ: lego_goal.py · position จริง: lego_webull_read.py GET อย่างเดียว
                         4 path ไม่ส่ง order ไม่สร้าง token + lego_positions.py · chain ของ bot จาก PROD) · ยังไม่คิด premium
+  🧪 ประวัติเป้า      — (ทดสอบ) ห่างจากเป้า + Eₙ และ Eₙ สะสมตามเวลา จากแถวเก่าของ bot (lego_goal_history.py)
   ⚡ Cheat Sheet       — แท็บย่อย 📝 Summary: สรุป 10 ข้อ + ประโยคเดียว (cheat_sheet/summary.md)
                         และ 🔀 Diagrams: แผนภาพ Mermaid (.mmd ใน cheat_sheet/): main rebalancing,
                         rollover (beta += (Fix_c − Fix_c_new) * ln(P_acted / P₀)) และ Option Scale
@@ -96,6 +97,7 @@ from lego_charts import (MAX_ACT_MARKERS, PLOTLY_CONFIG, ledger_figure,
 # แท็บ 🎯 Goal — position จริงจาก Webull (อ่านอย่างเดียว) + chain ของ bot · reload guard แบบเดียวกับด้านบน
 # (hot deploy ต้องไม่ได้โมดูลรุ่นเก่าปนกับหน้าใหม่)
 import lego_goal as goal
+import lego_goal_history as goal_history
 import lego_positions as positions
 import lego_webull_read as _lego_webull_read
 
@@ -103,6 +105,8 @@ if getattr(_lego_webull_read, "SNAPSHOT_SCHEMA", 0) < 2:
     _lego_webull_read = importlib.reload(_lego_webull_read)
 if getattr(goal, "GOAL_SCHEMA", 0) < 3:          # 3 = แกน 0..1.5 × P₀ · รวมพอร์ต · เปิดเฉพาะเป้า + Payoff + Eₙ
     goal = importlib.reload(goal)
+if getattr(goal_history, "HISTORY_SCHEMA", 0) < 1:  # แท็บ 🧪 ประวัติเป้า (ทดสอบ)
+    goal_history = importlib.reload(goal_history)
 
 from lego_webull_read import WebullReadError, fetch_account_snapshot, redact
 
@@ -919,6 +923,143 @@ def render_goal_tab() -> None:
     goal_panel(snap, chains, chain_issues)
 
 
+# ---------------------------------------------------------------- 🧪 ประวัติเป้า (แท็บทดสอบ)
+# ห่างจากเป้า + Eₙ ตามเวลา จากแถวเก่าของ bot (webull_lego_rows ของ chain ปัจจุบัน) · สูตรอยู่ใน lego_goal_history
+# ใช้ position จาก Webull ชุดเดียวกับ 🎯 Goal (หา strike ของ LEAPS) · ไม่แก้โค้ดแท็บ 🎯 Goal · widget key ขึ้นต้นด้วย hist_
+HISTORY_NOTE = ("แต่ละจุด = ค่าที่แท็บ 🎯 Goal จะแสดง ณ เวลานั้น: ราคา, หุ้นจริง, LEAPS และ Eₙ ของแถว bot รอบนั้น · "
+                "FIX_C / P₀ ของ chain ปัจจุบัน · strike ใช้ของ LEAPS ใน Webull ตอนนี้ (แถวเก่าไม่เก็บ strike) · "
+                "ยังไม่คิด premium · จุดสุดท้าย = แถว bot ล่าสุด จึงอาจต่างจาก 🎯 Goal ที่ใช้ราคาล่าสุดของ Webull · "
+                "รวมพอร์ต: แต่ละตัวใช้ค่าล่าสุดของตัวเองจนกว่าจะมีแถวใหม่ · หน่วยเป็น model ไม่ใช่ P/L ของบัญชี")
+
+
+@st.cache_data(ttl=WEBULL_TTL_S, show_spinner=False)
+def _history_rows() -> dict:
+    """PROD เท่านั้น: webull_lego_rows ทั้ง node (อ่านอย่างมาก 5 นาทีครั้ง)"""
+    if not (_has_secret("FIREBASE_SA_JSON") and _prod_url()):
+        return {}
+    _init()
+    rows = _ref("webull_lego_rows").get()
+    return rows if isinstance(rows, dict) else {}
+
+
+def _history_refresh_button() -> None:
+    now = pd.Timestamp.now(tz="UTC").timestamp()
+    wait = WEBULL_COOLDOWN_S - (now - float(st.session_state.get("hist_refreshed_at", 0.0)))
+    if st.button("⟳ รีเฟรช", key="hist_refresh", disabled=wait > 0,
+                 help=(f"รีเฟรชได้อีกใน {wait:.0f} วินาที" if wait > 0
+                       else f"ข้อมูลเก็บไว้ {WEBULL_TTL_S // 60} นาที กดเพื่อดึงใหม่")):
+        st.session_state["hist_refreshed_at"] = now
+        _webull_snapshot.clear()
+        _bot_chains.clear()
+        _history_rows.clear()
+        st.rerun()
+
+
+def _history_cards(df: pd.DataFrame) -> None:
+    gap, excess = goal_history.gap_change(df), goal_history.trend(df, "excess")
+    whole = goal_history.trend(df, "excess", days=36500)
+    cards = st.columns(4)
+    if gap is None or excess is None:
+        cards[0].metric("ห่างจากเป้า + Eₙ (ล่าสุด)", _signed(df["gap_e"].iloc[-1] if len(df) else None))
+        st.caption("ⓘ มีแถวไม่พอคำนวณแนวโน้ม")
+        return
+    span = f"{gap['days']:.1f} วัน" + (" (ตั้งแต่แถวแรก)" if gap["partial"] else "")
+    cards[0].metric("ห่างจากเป้า + Eₙ (ล่าสุด)", _signed(gap["last"]), delta=f"{gap['change']:+,.2f} ใน {span}",
+                    help=f"{gap['side']} · {span}ก่อน {_signed(gap['ref'])}")
+    cards[1].metric(f"ช่องว่างกับเป้า ({goal_history.TREND_DAYS} วัน)", f"{gap['word']} {abs(gap['width_change']):,.2f}",
+                    help=f"|ห่างจากเป้า + Eₙ| จาก {abs(gap['ref']):,.2f} เป็น {abs(gap['last']):,.2f} · ตอนนี้{gap['side']}")
+    cards[2].metric("Eₙ สะสม (ล่าสุด)", _signed(excess["last"]), delta=f"{excess['change']:+,.2f} ใน {span}")
+    cards[3].metric(f"Eₙ ต่อวัน ({goal_history.TREND_DAYS} วัน)", _signed(excess["rate"]),
+                    help=f"ทั้ง chain {_signed(whole['rate'] if whole else None)} USD/วัน · นับวันปฏิทิน")
+
+
+def _render_history(snap: dict, chains: dict, chain_issues: dict, rows_raw: dict, now) -> None:
+    head, action = st.columns([6, 1], vertical_alignment="center")
+    with head:
+        st.subheader("🧪 ประวัติเป้า · ห่างจากเป้า + Eₙ ตามเวลา (ทดสอบ)")
+        st.caption(_webull_status_line(snap) + " · อ่านอย่างเดียว · ยังไม่คิด premium")
+    with action:
+        _history_refresh_button()
+    books, notes = positions.build_books(snap, chains, chain_issues, now)
+    items, issues = goal.collect(books)
+    frames, kept = {}, []
+    for inputs in items:
+        rows, row_notes = goal_history.chain_rows(rows_raw, chains[inputs.symbol].chain_key)
+        issues += row_notes
+        if rows.empty:
+            issues.append(f"{inputs.symbol}: ไม่มีแถวของ chain ปัจจุบันใน webull_lego_rows")
+            continue
+        frames[inputs.symbol] = goal_history.history(inputs, rows)
+        kept.append(inputs.symbol)
+    if not frames:
+        st.info("ยังไม่มีประวัติที่คำนวณได้ (ดูเหตุผลด้านล่าง)" if books else "ไม่มี position ในบัญชีตอนนี้")
+        _goal_notes(issues)
+        return
+    choices = kept + ([goal.ALL] if len(kept) > 1 else [])
+    if st.session_state.get("hist_symbol") not in choices:
+        st.session_state["hist_symbol"] = choices[0]
+    pick = st.segmented_control("ตัว", choices, key="hist_symbol") or choices[0]
+    combined = pick == goal.ALL
+    df = goal_history.portfolio_history(list(frames.values())) if combined else frames[pick]
+    if df.empty:
+        st.info("ยังไม่มีช่วงเวลาที่ทุกตัวมีแถวพร้อมกัน")
+        _goal_notes(issues)
+        return
+    name = "รวมพอร์ต" if combined else pick
+    _history_cards(df)
+    theme = _streamlit_theme()
+    first, last = df["time"].iloc[0], df["time"].iloc[-1]
+    span = f"{first:%Y-%m-%d} ถึง {last:%Y-%m-%d %H:%M} UTC · {len(df)} จุด" + (f" · {len(frames)} ตัว" if combined else "")
+    config = dict(goal_history.CHART_CONFIG,
+                  toImageButtonOptions=dict(goal_history.CHART_CONFIG["toImageButtonOptions"],
+                                            filename=f"goal_history_{'portfolio' if combined else pick}"))
+    st.plotly_chart(goal_history.gap_history_figure(df, theme=theme, title=f"{name} · ห่างจากเป้า + Eₙ ตามเวลา",
+                                                    subtitle=span),
+                    theme=None, config=config, key="hist_gap_chart")
+    st.caption("ตอนเริ่มเปิดเฉพาะ ห่างจากเป้า + Eₙ · ห่างจากเป้า (ไม่รวม Eₙ) คลิกชื่อใน legend · เส้น 0 = เป้า")
+    excess, whole = goal_history.trend(df, "excess"), goal_history.trend(df, "excess", days=36500)
+    rates = (f"{goal_history.TREND_DAYS} วันล่าสุด {_signed(excess['rate'] if excess else None)} USD/วัน · "
+             f"ทั้ง chain {_signed(whole['rate'] if whole else None)} USD/วัน")
+    st.plotly_chart(goal_history.excess_history_figure(df, theme=theme, title=f"{name} · Eₙ สะสมของ bot",
+                                                       subtitle=rates),
+                    theme=None, config=config, key="hist_excess_chart")
+    st.caption(HISTORY_NOTE)
+    with st.expander("รายวัน (แถวสุดท้ายของแต่ละวัน UTC)"):
+        table = goal_history.daily_table(df)
+        st.dataframe(table, hide_index=True, column_config={
+            col: st.column_config.NumberColumn(format="%.2f") for col in table.columns if col != "วัน (UTC)"})
+    _goal_notes(issues + [n for n in notes if not n.startswith(positions.SKIP_PREFIX)])
+
+
+@st.fragment
+def history_panel(snap: dict, chains: dict, chain_issues: dict, rows_raw: dict) -> None:
+    """เนื้อหาแท็บประวัติเป้า — กดเลือกในแท็บ rerun แค่ส่วนนี้ (ไม่เรียก Webull / Firebase ซ้ำ)"""
+    try:
+        _render_history(snap, chains, chain_issues, rows_raw, pd.Timestamp.now(tz="UTC").to_pydatetime())
+    except Exception as exc:                 # ไม่พาแท็บอื่นล้ม
+        st.error(f"แสดงแท็บประวัติเป้าไม่ได้ ({type(exc).__name__}: {redact(exc)})")
+
+
+def render_history_tab() -> None:
+    if not _webull_ready():
+        st.info("ตั้ง st.secrets ของ Webull ก่อน (เหมือนแท็บ 🎯 Goal) จึงจะเห็นประวัติห่างจากเป้า + Eₙ")
+        return
+    try:
+        with st.spinner("กำลังดึง position จาก Webull"):
+            snap = _webull_snapshot(_webull_fingerprint())
+    except Exception as exc:     # WebullReadError = ข้อความไทย (redact แล้ว) · อื่น ๆ = ชนิดเท่านั้น
+        st.error(f"ดึงข้อมูล Webull ไม่ได้ — {exc}" if isinstance(exc, WebullReadError)
+                 else f"ดึงข้อมูล Webull ไม่ได้ ({type(exc).__name__})")
+        return
+    try:
+        chains, chain_issues = _bot_chains()
+        rows_raw = _history_rows()
+    except Exception as exc:     # ไม่มี state / แถว = คำนวณไม่ได้ (fail closed) + เหตุผล
+        chains, chain_issues, rows_raw = {}, {}, {}
+        st.caption(f"ⓘ อ่าน Firebase ไม่ได้ ({type(exc).__name__}) — ไม่มี FIX_C, P₀ และแถวของ bot")
+    history_panel(snap, chains, chain_issues, rows_raw)
+
+
 def main():
     st.set_page_config(page_title="LEGO PROD", layout="wide")
     st.title("🧬 LEGO Shannon Demon: PROD")
@@ -933,9 +1074,9 @@ def main():
                                  key="database") == DATABASE_PAPER
     render_prod_banner(paper)
 
-    # 🎯 Goal อยู่ก่อน ⚡ Cheat Sheet: เทสต์เดิมกำหนดให้ Cheat Sheet เป็นแท็บสุดท้าย
-    tab_live, tab_101, tab_web, tab_goal, tab_cheat = st.tabs(
-        ["📊 Live Dashboard", "🎓 Rebalancing 101", "🌐 Web Apps", "🎯 Goal", "⚡ Cheat Sheet"])
+    # 🎯 Goal / 🧪 ประวัติเป้า อยู่ก่อน ⚡ Cheat Sheet: เทสต์เดิมกำหนดให้ Cheat Sheet เป็นแท็บสุดท้าย
+    tab_live, tab_101, tab_web, tab_goal, tab_history, tab_cheat = st.tabs(
+        ["📊 Live Dashboard", "🎓 Rebalancing 101", "🌐 Web Apps", "🎯 Goal", "🧪 ประวัติเป้า", "⚡ Cheat Sheet"])
     with tab_live:
         render_live_dashboard(paper)
     with tab_101:
@@ -944,6 +1085,8 @@ def main():
         render_web_apps()
     with tab_goal:
         render_goal_tab()
+    with tab_history:
+        render_history_tab()
     with tab_cheat:
         render_cheat_sheets()
 
