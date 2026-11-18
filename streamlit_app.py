@@ -8,15 +8,15 @@
                         Integrity E1–E8 ที่คำนวณเมื่อเปิดเท่านั้น, State pointer) และ กราฟ (Rₙ/Aₙ/Eₙ ตามวัน
                         + Eₙ ผลรวมทุกตัวตามเวลา) — สลับ Chain/แท็บ/วันไม่อ่าน Firebase ซ้ำ ไม่คำนวณซ้ำ
                         (กราฟทั้งหมดเป็น Plotly จาก lego_charts.py)
+  🎯 Payoff           — Payoff = ขาหุ้น + ขา LEAPS (+ Eₙ ของ bot) เทียบเป้า FIX_C·ln(x/P₀) จากสถานะจริง ต่อตัว
+                        และรวมพอร์ต (สูตร/กราฟ: lego_goal.py · position จริง: lego_webull_read.py GET อย่างเดียว
+                        4 path ไม่ส่ง order ไม่สร้าง token + lego_positions.py · chain ของ bot จาก PROD) · ยังไม่คิด premium
   🎓 Rebalancing 101  — playground เชิงสอน "gated demo (DNA gate + บัญชีแบบแช่แข็ง)"
                         ไม่ต้องมี Firebase: สุ่มราคา -> เดิน ledger gated_theoretical_v2
                         เห็นว่ารอบ "จำนวนสั่ง = 0" (pass/แช่แข็ง) ถูกบันทึกอย่างไร
   🌐 Web Apps         — คู่มือ/playground แบบโต้ตอบ (HTML ล้วนใน web_apps/ แสดงใน iframe)
                         คัดลอกจากแท็บ Web Apps ของ pages/Manual.py (leg-code):
                         Rebalancing 101 + Rebalancing Playground — ไม่เรียก Firebase
-  🎯 Payoff           — Payoff = ขาหุ้น + ขา LEAPS (+ Eₙ ของ bot) เทียบเป้า FIX_C·ln(x/P₀) จากสถานะจริง ต่อตัว
-                        และรวมพอร์ต (สูตร/กราฟ: lego_goal.py · position จริง: lego_webull_read.py GET อย่างเดียว
-                        4 path ไม่ส่ง order ไม่สร้าง token + lego_positions.py · chain ของ bot จาก PROD) · ยังไม่คิด premium
   ⚡ Cheat Sheet       — แท็บย่อย 📝 Summary: สรุป 10 ข้อ + ประโยคเดียว (cheat_sheet/summary.md)
                         และ 🔀 Diagrams: แผนภาพ Mermaid (.mmd ใน cheat_sheet/): main rebalancing,
                         rollover (beta += (Fix_c − Fix_c_new) * ln(P_acted / P₀)) และ Option Scale
@@ -101,7 +101,7 @@ import lego_webull_read as _lego_webull_read
 
 if getattr(_lego_webull_read, "SNAPSHOT_SCHEMA", 0) < 2:
     _lego_webull_read = importlib.reload(_lego_webull_read)
-if getattr(goal, "GOAL_SCHEMA", 0) < 3:          # 3 = แกน 0..1.5 × P₀ · รวมพอร์ต · เปิดเฉพาะเป้า + Payoff + Eₙ
+if getattr(goal, "GOAL_SCHEMA", 0) < 4:          # 4 = รวมพอร์ต "ตอนนี้" เป็น % เทียบเท่าค่าเดียว
     goal = importlib.reload(goal)
 
 from lego_webull_read import WebullReadError, fetch_account_snapshot, redact
@@ -805,9 +805,10 @@ def _goal_cards(items: list, total: dict, combined: bool) -> None:
     """8 การ์ด 2 แถว · รวมพอร์ต = ผลรวมของแต่ละตัวที่ราคาตอนนี้ของตัวเอง · น้ำหนักเทียบ Σ FIX_C"""
     cards = st.columns(4) + st.columns(4)
     if combined:
-        lo, hi = min(i.pct_now for i in items), max(i.pct_now for i in items)
-        cards[0].metric("ตอนนี้ (% ของ P₀)", f"{lo:.0f}–{hi:.0f}%" if round(lo) != round(hi) else f"{lo:.0f}%",
-                        help=" · ".join(f"{i.symbol} {i.pct_now:.1f}%" for i in items))
+        cards[0].metric("ตอนนี้ (% ของ P₀)", f"{goal.portfolio_pct_now(items):.1f}%",
+                        help=("ค่าเฉลี่ยเรขาคณิตถ่วงด้วย FIX_C ของแต่ละตัว ("
+                              + " · ".join(f"{i.symbol} {i.pct_now:.1f}%" for i in items)
+                              + ") — ที่ % นี้เส้นเป้ารวมเท่ากับผลรวมเป้าตอนนี้พอดี"))
     else:
         inputs = items[0]
         cards[0].metric("ราคาตอนนี้", f"{inputs.spot:,.2f}",
@@ -847,9 +848,9 @@ def _render_goal(snap: dict, chains: dict, chain_issues: dict, now) -> None:
         _goal_notes(issues + notes)
         return
     choices = [i.symbol for i in items] + ([goal.ALL] if len(items) > 1 else [])
-    if st.session_state.get("goal_symbol") not in choices:
-        st.session_state["goal_symbol"] = choices[0]
-    pick = st.segmented_control("ตัว", choices, key="goal_symbol") or choices[0]
+    if st.session_state.get("goal_symbol") not in choices:      # ค่าเริ่มต้น = รวมพอร์ต (มี ≥ 2 ตัว)
+        st.session_state["goal_symbol"] = choices[-1]
+    pick = st.segmented_control("ตัว", choices, key="goal_symbol") or choices[-1]
     combined = pick == goal.ALL
     picked = items if combined else [next(i for i in items if i.symbol == pick)]
     total = goal.summary(picked)
@@ -859,7 +860,8 @@ def _render_goal(snap: dict, chains: dict, chain_issues: dict, now) -> None:
     if combined:
         axis = goal.portfolio_axis(picked)
         df = goal.portfolio_curves(picked, goal.pct_grid(picked))
-        fig = goal.goal_figure(df, axis, theme=theme, title="รวมพอร์ต · Payoff + Eₙ เทียบเป้า",
+        fig = goal.goal_figure(df, axis, now=(goal.portfolio_pct_now(picked), total), theme=theme,
+                               title="รวมพอร์ต · Payoff + Eₙ เทียบเป้า",
                                subtitle=(f"{len(picked)} ตัว · Σ FIX_C {total['fix_c']:,.0f} · ครอบคลุม "
                                          f"{_percent(total['coverage'])} · Σ Eₙ {_signed(total['excess'])} · {stamp}"))
         filename, equations = "goal_portfolio", goal.portfolio_equation_text(picked)
@@ -933,17 +935,17 @@ def main():
                                  key="database") == DATABASE_PAPER
     render_prod_banner(paper)
 
-    # 🎯 Payoff อยู่ก่อน ⚡ Cheat Sheet: เทสต์เดิมกำหนดให้ Cheat Sheet เป็นแท็บสุดท้าย
-    tab_live, tab_101, tab_web, tab_payoff, tab_cheat = st.tabs(
-        ["📊 Live Dashboard", "🎓 Rebalancing 101", "🌐 Web Apps", "🎯 Payoff", "⚡ Cheat Sheet"])
+    # ลำดับแท็บ: Live → 🎯 Payoff → 101 → Web Apps → ⚡ Cheat Sheet (เทสต์เดิมกำหนดให้ Cheat Sheet เป็นแท็บสุดท้าย)
+    tab_live, tab_payoff, tab_101, tab_web, tab_cheat = st.tabs(
+        ["📊 Live Dashboard", "🎯 Payoff", "🎓 Rebalancing 101", "🌐 Web Apps", "⚡ Cheat Sheet"])
     with tab_live:
         render_live_dashboard(paper)
+    with tab_payoff:
+        render_goal_tab()
     with tab_101:
         render_rebalancing_101()
     with tab_web:
         render_web_apps()
-    with tab_payoff:
-        render_goal_tab()
     with tab_cheat:
         render_cheat_sheets()
 

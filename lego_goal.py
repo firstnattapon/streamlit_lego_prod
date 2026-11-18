@@ -23,7 +23,8 @@ x = ราคาบนแกน 0 ถึง 1.5 × p0 · fix_c, p0, excess = cha
 leaps_shares = 100 × สัญญา · ขา LEAPS เริ่มที่ 0 ที่ p0 (เทียบกับเป้าได้) และนับ LEAPS เป็นหุ้นเต็มเหนือ strike
 
 รวมพอร์ต: แกน = % ของ P₀ (สมมติทุกตัวขยับ % ของ P₀ ของตัวเองเท่ากัน) · แต่ละเส้น = ผลรวมของทุกตัว
-ที่ราคา p0ᵢ × % / 100 · ค่า "ตอนนี้" = ผลรวมของแต่ละตัวที่ราคาตอนนี้ของตัวเอง
+ที่ราคา p0ᵢ × % / 100 · ค่า "ตอนนี้" = ผลรวมของแต่ละตัวที่ราคาตอนนี้ของตัวเอง ·
+% ตอนนี้ (เทียบเท่า) = 100 · exp(Σ fix_cᵢ · ln(pctᵢ / 100) / Σ fix_cᵢ) — ที่ % นี้เส้นเป้ารวม = ผลรวมเป้าตอนนี้พอดี
 """
 from __future__ import annotations
 
@@ -38,7 +39,7 @@ import plotly.graph_objects as go
 
 from lego_charts import FONT_FAMILY, LINE, REFERENCE_DASH, theme_tokens
 
-GOAL_SCHEMA = 3                     # 3 = แกน 0..1.5 × P₀ · รวมพอร์ต · ค่าเริ่มต้นเปิดเฉพาะเป้า + Payoff + Eₙ
+GOAL_SCHEMA = 4                     # 4 = รวมพอร์ต "ตอนนี้" เป็นค่าเดียว (% เทียบเท่า) แทนช่วง
 PRICE, PCT = "price", "pct"
 ALL = "รวมพอร์ต"
 LINE_KEYS = ("goal", "stock_leg", "leaps_leg", "payoff", "payoff_e")
@@ -55,7 +56,6 @@ MIN_FRACTION = 0.01                 # ln(0) = −∞ → ข้อมูลเ�
 Y_FIT_FROM = 0.25                   # แกน y พอดีกับค่าตั้งแต่ 25% ของ P₀ (ซ้ายกว่านั้น ln ลงลึกจนกราฟแบน)
 GRID_POINTS = 301
 BAND_ALPHA = 0.12
-NOW_ALPHA = 0.10
 STATUS = {"good": "#0ca30c", "critical": "#d03b3b"}   # dataviz status palette (คู่กับ ▲/▼ + ข้อความเสมอ)
 ZONE_ALPHA = 0.045
 CHART_CONFIG = {"displaylogo": False, "scrollZoom": False, "doubleClick": "reset",
@@ -186,10 +186,17 @@ def goal_grid(inputs: GoalInputs, n: int = GRID_POINTS) -> np.ndarray:
     return np.unique(np.concatenate([np.linspace(lo, hi, n), [x for x in extra if lo <= x <= hi]]))
 
 
+def portfolio_pct_now(items: Sequence[GoalInputs]) -> float:
+    """% ของ P₀ "ตอนนี้" ของทั้งพอร์ตเป็นค่าเดียว = ค่าเฉลี่ยเรขาคณิตถ่วงด้วย FIX_C
+    → Σ fix_cᵢ · ln(pct* / 100) = Σ fix_cᵢ · ln(pctᵢ / 100) คือเส้นเป้ารวมที่ pct* เท่ากับผลรวมเป้าตอนนี้พอดี"""
+    total = sum(i.fix_c for i in items)
+    return 100.0 * math.exp(sum(i.fix_c * math.log(i.pct_now / 100.0) for i in items) / total)
+
+
 def pct_grid(items: Sequence[GoalInputs] = (), n: int = GRID_POINTS) -> np.ndarray:
-    """% ของ P₀ จาก 1 ถึง 150 + % ตอนนี้ของแต่ละตัว"""
+    """% ของ P₀ จาก 1 ถึง 150 + % ตอนนี้ของแต่ละตัวและของทั้งพอร์ต"""
     lo, hi = MIN_FRACTION * 100.0, RANGE_HI * 100.0
-    extra = [100.0, *(i.pct_now for i in items)]
+    extra = [100.0, *(i.pct_now for i in items), *([portfolio_pct_now(items)] if items else [])]
     return np.unique(np.concatenate([np.linspace(lo, hi, n), [x for x in extra if lo <= x <= hi]]))
 
 
@@ -319,6 +326,8 @@ def portfolio_equation_text(items: Sequence[GoalInputs]) -> str:
     return "\n".join([
         f"รวมพอร์ต ({len(items)} ตัว) — แต่ละตัวใช้ fix_c, p0, หุ้น, LEAPS และ excess ของตัวเอง",
         "แกน: x_i = p0_i · pct / 100  (สมมติทุกตัวขยับ % ของ P₀ เท่ากัน)",
+        "ตอนนี้ (เทียบเท่า) pct* = 100 · exp(Σ fix_c_i · ln(pct_i / 100) / Σ fix_c_i) = "
+        f"{portfolio_pct_now(items):.2f}%  (goal_รวม(pct*) = ผลรวม goal ตอนนี้)",
         f"  goal_รวม(pct)     = Σ fix_c_i · ln(pct / 100) = {total['fix_c']:,.0f} · ln(pct / 100)",
         "  payoff_รวม(pct)   = Σ [stock_leg_i + leaps_leg_i](x_i)",
         f"  payoff_e_รวม(pct) = payoff_รวม(pct) + Σ excess_i = payoff_รวม(pct) {_fmt(total['excess'])}",
@@ -335,14 +344,13 @@ def portfolio_equation_text(items: Sequence[GoalInputs]) -> str:
 
 @dataclass(frozen=True)
 class Axis:
-    """แกน x ของกราฟ: คอลัมน์, ชื่อ, ปลายขวา, จุดเริ่มพอดีแกน y, เส้นตั้ง และแถบ "ตอนนี้" (รวมพอร์ต)"""
+    """แกน x ของกราฟ: คอลัมน์, ชื่อ, ปลายขวา, จุดเริ่มพอดีแกน y และเส้นตั้ง"""
     col: str
     title: str
     hover: str
     x_max: float
     y_fit_from: float
     marks: tuple[tuple[float, str, str, bool], ...] = ()       # (x, ป้าย, dash, เข้ม)
-    now_band: tuple[float, float, str] | None = None
     suffix: str = ""
 
 
@@ -355,12 +363,10 @@ def symbol_axis(inputs: GoalInputs) -> Axis:
 
 
 def portfolio_axis(items: Sequence[GoalInputs]) -> Axis:
-    pcts = [i.pct_now for i in items]
-    lo, hi = min(pcts), max(pcts)
-    text = f"ตอนนี้ {lo:.0f}%" if round(lo) == round(hi) else f"ตอนนี้ {lo:.0f}–{hi:.0f}%"
+    now = portfolio_pct_now(items)
     return Axis(PCT, "% ของ P₀ (สมมติทุกตัวขยับ % ของ P₀ เท่ากัน)", "<b>%{x:.1f}%</b> ของ P₀ ทุกตัว",
-                RANGE_HI * 100.0, Y_FIT_FROM * 100.0, ((100.0, "P₀ (100%)", "dash", False),),
-                (lo, hi, text), "%")
+                RANGE_HI * 100.0, Y_FIT_FROM * 100.0,
+                ((100.0, "P₀ (100%)", "dash", False), (now, f"ตอนนี้ {now:.1f}%", "solid", True)), "%")
 
 
 def _rgba(hex_color: str, alpha: float) -> str:
@@ -413,16 +419,12 @@ def _layout(tok: dict, axis: Axis, *, height: int, title: str | None, subtitle: 
 
 
 def _marks(fig: go.Figure, tok: dict, axis: Axis) -> None:
-    """เส้นตั้ง (strike จุด · P₀ ประ · ตอนนี้ ทึบ) และแถบ "ตอนนี้" ของรวมพอร์ต + ป้ายด้านในขอบบน"""
+    """เส้นตั้ง (strike จุด · P₀ ประ · ตอนนี้ ทึบ) + ป้ายด้านในขอบบน"""
     label = dict(yanchor="top", font=dict(family=FONT_FAMILY, size=12, color=tok["text_secondary"]))
     for x, text, dash, strong in axis.marks:
         if 0 <= x <= axis.x_max:
             fig.add_vline(x=x, line=dict(color=tok["axis"] if strong else tok["grid"], width=1, dash=dash),
                           annotation=dict(text=text, **label), annotation_position="top right")
-    if axis.now_band is not None:
-        lo, hi, text = axis.now_band
-        fig.add_vrect(x0=lo - 0.5, x1=hi + 0.5, fillcolor=_rgba(tok["series"][0], NOW_ALPHA), line_width=0,
-                      layer="below", annotation=dict(text=text, **label), annotation_position="top left")
 
 
 def _spread(values: Sequence[float], gap: float) -> list[float]:
