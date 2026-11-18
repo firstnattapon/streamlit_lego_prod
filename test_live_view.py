@@ -161,7 +161,7 @@ def test_a_failed_read_keeps_the_other_tabs_and_offers_a_refresh(monkeypatch):
     assert any("โหลดข้อมูลไม่ได้" in e.value and "rtdb unreachable" in e.value for e in page.error)
     assert status_line(page).startswith(":red-badge[ผิดพลาด]")
     assert page.button(key="live_refresh").label == "รีเฟรช"
-    assert len(page.tabs) == 8 and len(page.number_input) == 6       # อีก 5 แท็บยังอยู่ครบ
+    assert len(page.tabs) == 7 and len(page.number_input) == 6       # อีก 4 แท็บยังอยู่ครบ
 
 
 def test_an_optional_node_that_fails_is_a_warning_not_a_crash(monkeypatch):
@@ -201,7 +201,7 @@ def test_a_chain_that_cannot_be_computed_leaves_the_picker_to_choose_another(mon
     page.run(timeout=30)
     assert not page.exception
     assert any("แสดงหน้า Live ไม่ได้" in e.value and "bad cell" in e.value for e in page.error)
-    assert len(page.tabs) == 8 and len(page.number_input) == 6           # อีก 5 แท็บยังอยู่
+    assert len(page.tabs) == 7 and len(page.number_input) == 6           # อีก 4 แท็บยังอยู่
     chain_box(page).set_value(CHAIN).run(timeout=30)
     assert not page.exception and not page.error and LIVE_LABELS <= set(metrics(page))
 

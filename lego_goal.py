@@ -1,4 +1,4 @@
-"""แท็บ 🎯 Goal — Payoff = ขาหุ้น + ขา LEAPS เทียบ "เป้า" FIX_C·ln จากสถานะจริง (ยังไม่คิด premium)
+"""แท็บ 🎯 Payoff — Payoff = ขาหุ้น + ขา LEAPS เทียบ "เป้า" FIX_C·ln จากสถานะจริง (ยังไม่คิด premium)
 
 โมดูลนี้แยกจากแท็บอื่น (isolation): ไม่ import lego_positions / streamlit · รับ "book" ต่อ symbol แบบ duck typing
 (symbol, spot, legs, usable_chain, chain) · วาดกราฟเองด้วย token สีของ lego_charts

@@ -1,4 +1,4 @@
-"""แท็บ 🎯 Goal — สูตร (lego_goal) และหน้าเว็บ (AppTest) · ตัวเลขทั้งหมดเป็นตัวอย่างสมมติ ไม่ใช่ข้อมูลบัญชี"""
+"""แท็บ 🎯 Payoff — สูตร (lego_goal) และหน้าเว็บ (AppTest) · ตัวเลขทั้งหมดเป็นตัวอย่างสมมติ ไม่ใช่ข้อมูลบัญชี"""
 from __future__ import annotations
 
 import ast
@@ -288,9 +288,9 @@ def test_the_goal_tab_shows_weights_charts_and_equations(monkeypatch):
     assert any("stock_weight = shares · spot / fix_c" in c.value for c in app.code)
     picker = app.button_group(key="goal_symbol")
     assert picker.value == "AAA" and list(picker.options) == ["AAA"]  # ตัวเดียว → ไม่มีรวมพอร์ต
-    assert [t.label for t in app.tabs][:6] == ["📊 Live Dashboard", "🎓 Rebalancing 101", "🌐 Web Apps", "🎯 Goal",
-                                               "🧪 ประวัติเป้า", "⚡ Cheat Sheet"]          # ไม่มีแท็บ 📐 Payoff
-    assert len(app.get("plotly_chart")) == 3                          # 101 + Goal (กราฟหลัก + ห่างจากเป้า)
+    assert [t.label for t in app.tabs][:5] == ["📊 Live Dashboard", "🎓 Rebalancing 101", "🌐 Web Apps", "🎯 Payoff",
+                                               "⚡ Cheat Sheet"]          # แท็บเดิมชื่อ 🎯 Goal
+    assert len(app.get("plotly_chart")) == 3                          # 101 + 🎯 Payoff (กราฟหลัก + ห่างจากเป้า)
 
 
 def test_the_goal_tab_has_a_portfolio_choice(monkeypatch):

@@ -1,6 +1,6 @@
 """lego_positions.py — position จริงจาก Webull + chain ของ bot ต่อ symbol (pure: ไม่ import streamlit / webull SDK)
 
-ชั้นข้อมูลของแท็บ 🎯 Goal (สูตรและกราฟอยู่ใน lego_goal.py):
+ชั้นข้อมูลของแท็บ 🎯 Payoff (สูตรและกราฟอยู่ใน lego_goal.py):
   parse_positions  อ่าน positions ของ Webull (OpenAPI v3 ``legs`` และแบบ MCP ``items``) → Leg ต่อขา
   lego_chains      อ่าน ``webull_lego_state`` + แถวล่าสุดของ chain → FIX_C, P₀, Eₙ (fail closed)
   build_books      รวมเป็น SymbolBook ต่อ symbol (ราคา, ขา, chain) · IV / delta ของ option จาก Webull
