@@ -59,7 +59,7 @@ FIREBASE_DB_URL_PAPER = "https://lego-firebase-paper.asia-southeast1.firebasedat
 
 ## ไฟล์หลัก
 
-- `streamlit_app.py` — หน้า Live Dashboard, Rebalancing 101, Web Apps, Payoff และ Cheat Sheet
+- `streamlit_app.py` — หน้า Live Dashboard, Payoff, Rebalancing 101, Web Apps และ Cheat Sheet (เรียงตามแท็บ)
 - `web_apps/` — คู่มือ/playground แบบ HTML ล้วน แสดงใน iframe ผ่าน `components.html`
   (รายละเอียดด้านล่าง)
 - `cheat_sheet/` — แผนภาพ Mermaid `.mmd` + ภาพ PNG ที่ render ไว้ + `summary.md` (สรุป 10 ข้อ + ประโยคเดียว) ·

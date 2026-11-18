@@ -102,7 +102,7 @@ def test_tabs_are_listed_in_order():
 
     assert not app.exception
     assert [tab.label for tab in app.tabs] == [
-        "📊 Live Dashboard", "🎓 Rebalancing 101", "🌐 Web Apps", "🎯 Payoff", "⚡ Cheat Sheet",
+        "📊 Live Dashboard", "🎯 Payoff", "🎓 Rebalancing 101", "🌐 Web Apps", "⚡ Cheat Sheet",
         "📝 Summary", "🔀 Diagrams"]            # the last two sit inside the Cheat Sheet tab, Summary first
 
 
