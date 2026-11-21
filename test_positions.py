@@ -21,6 +21,7 @@ from pathlib import Path
 
 import firebase_admin
 import firebase_admin.db  # noqa: F401  (goal_app patch firebase_admin.db.reference — ต้องโหลดก่อน)
+import pandas as pd
 import pytest
 import streamlit as st
 from streamlit.testing.v1 import AppTest
@@ -52,7 +53,14 @@ STATE = {
     "AAA_fake01": {"symbol": "AAA", "updated_at": "2026-11-16T20:45:04Z", "p0": 10.0,
                    "prev_holdings": 60.0, "leaps_shares": 100.0, "last_run_id": "run_fake_1",
                    "execution_cashflow": {"actual_cumulative": -100.0, "excess": 20.0,
-                                          "r_basis": -120.0, "last_action_price": 9.0}},
+                                          "r_basis": -120.0, "last_action_price": 9.0,
+                                          "finalized_runs": {   # fill ที่ bot บันทึก (ไม่เรียงตาม key: เรียงด้วย seq)
+                                              "run_c": {"seq": 3, "at": "2026-11-14T15:00:00Z",
+                                                        "actual_cumulative": -100.0, "excess": 20.0},
+                                              "run_a": {"seq": 1, "at": "2026-11-10T15:00:00Z",
+                                                        "actual_cumulative": -60.0, "excess": 8.0},
+                                              "run_b": {"seq": 2, "at": "2026-11-12T15:00:00Z",
+                                                        "actual_cumulative": -150.0, "excess": 14.0}}}},
     "AAA_older": {"symbol": "AAA", "updated_at": "2026-10-01T15:00:00Z", "p0": 12.0,
                   "prev_holdings": 1.0, "leaps_shares": 0.0, "last_run_id": "run_fake_0",
                   "execution_cashflow": {"actual_cumulative": 1.0, "excess": 1.0,
@@ -60,6 +68,11 @@ STATE = {
 }
 ROWS = {"AAA_fake01": {positions.VALUE_COL: 1468.27, positions.GAP_COL: -31.73},
         "AAA_older": {positions.VALUE_COL: 900.0, positions.GAP_COL: -100.0}}
+# webull_lego_rows ทั้ง node (เฉพาะ field ที่ใช้หา t0) · แถวแรกของ AAA_fake01 = version 1
+ALL_ROWS = {"row_2": {"chain_key": "AAA_fake01", "version": 2, "committed": True, "เวลา (UTC)": "2026-11-10T14:45:00Z"},
+            "row_1": {"chain_key": "AAA_fake01", "version": 1, "committed": True, "เวลา (UTC)": "2026-11-10T14:30:00Z"},
+            "row_0": {"chain_key": "AAA_fake01", "version": 0, "committed": False, "เวลา (UTC)": "2026-11-09T14:30:00Z"},
+            "row_x": {"chain_key": "OTHER_x", "version": 1, "committed": True, "เวลา (UTC)": "2026-11-01T14:30:00Z"}}
 
 
 def legs() -> list[positions.Leg]:
@@ -220,6 +233,29 @@ def test_lego_chains_pick_the_latest_chain_and_read_v3_fields():
     assert (c.chain_key, c.fix_c, c.leaps_shares, c.real_holdings) == ("AAA_fake01", pytest.approx(1500.0),
                                                                      100.0, 60.0)
     assert (c.p_acted, c.actual, c.r_basis, c.excess, c.p0) == (9.0, -100.0, -120.0, 20.0, 10.0)
+
+
+def test_lego_chains_read_the_bot_fills_and_t0():
+    c = chain()
+    assert [(f.seq, f.actual, f.excess) for f in c.fills] == [(1, -60.0, 8.0), (2, -150.0, 14.0), (3, -100.0, 20.0)]
+    assert c.fills[0].at == pd.Timestamp("2026-11-10T15:00:00Z")
+    assert (c.t0, c.t0_source) == (pd.Timestamp("2026-11-10T15:00:00Z"), "fill")        # ไม่มีแถวแรก → fill แรก
+    starts = positions.chain_starts(ALL_ROWS, ["AAA_fake01"])
+    assert starts == {"AAA_fake01": "2026-11-10T14:30:00Z"}          # version ต่ำสุดที่ committed · ไม่ปน chain อื่น
+    chains, issues = positions.lego_chains(STATE, ROWS, starts)
+    assert not issues and (chains["AAA"].t0, chains["AAA"].t0_source) == (pd.Timestamp("2026-11-10T14:30Z"), "row")
+
+
+def test_unreadable_fills_are_skipped_and_no_fill_means_no_t0():
+    runs = {"a": {"seq": 1, "at": "เมื่อวาน", "actual_cumulative": 1.0, "excess": 1.0},
+            "b": {"seq": 2, "at": "2026-11-10T15:00:00Z", "actual_cumulative": None, "excess": 1.0},
+            "c": "ไม่ใช่ object", "d": {"at": "2026-11-11T15:00:00Z", "actual_cumulative": -5, "excess": "0.5"}}
+    assert [(f.seq, f.actual, f.excess) for f in positions.parse_fills(runs)] == [(0, -5.0, 0.5)]
+    assert positions.parse_fills(None) == () and positions.chain_starts(None, ["x"]) == {}
+    bare = {"AAA_x": {**STATE["AAA_fake01"], "execution_cashflow": {
+        k: v for k, v in STATE["AAA_fake01"]["execution_cashflow"].items() if k != "finalized_runs"}}}
+    chains, _ = positions.lego_chains(bare, {"AAA_x": ROWS["AAA_fake01"]})
+    assert chains["AAA"].fills == () and chains["AAA"].t0 is None and chains["AAA"].t0_source is None
 
 
 def test_lego_chains_fail_closed():
@@ -540,8 +576,10 @@ def snapshot(**extra) -> dict:
             "notes": [], **extra}
 
 
-def goal_app(monkeypatch, *, snap=None, error=None, firebase=True, state=None, rows=None) -> AppTest:
-    """แอปจริงกับ Webull / Firebase ปลอม · state/rows: chain_key → state / แถวล่าสุด (ค่าเริ่มต้น = fixture AAA)"""
+def goal_app(monkeypatch, *, snap=None, error=None, firebase=True, state=None, rows=None,
+             all_rows=None) -> AppTest:
+    """แอปจริงกับ Webull / Firebase ปลอม · state/rows: chain_key → state / แถวล่าสุด (ค่าเริ่มต้น = fixture AAA)
+    · all_rows: webull_lego_rows ทั้ง node (หา t0) · ค่าเริ่มต้น {} = แท็บ Live ว่าง และ t0 = เวลา fill แรก"""
     def fake_fetch(*args, **kwargs):
         if error is not None:
             raise error
@@ -551,7 +589,8 @@ def goal_app(monkeypatch, *, snap=None, error=None, firebase=True, state=None, r
     secrets = dict(WEBULL_SECRETS)
     if firebase:
         state, rows = state or STATE, rows or ROWS
-        payloads = {"webull_lego_state": state, "webull_lego_rows": {}, "webull_lego_order_audit": {}}
+        payloads = {"webull_lego_state": state, "webull_lego_rows": all_rows or {},
+                    "webull_lego_order_audit": {}}
         payloads.update({f"webull_lego_rows/{pointer['last_run_id']}": rows[key] for key, pointer in state.items()})
 
         class _Reference:

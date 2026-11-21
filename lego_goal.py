@@ -25,6 +25,15 @@ leaps_shares = 100 × สัญญา · ขา LEAPS เริ่มที่ 0
 รวมพอร์ต: แกน = % ของ P₀ (สมมติทุกตัวขยับ % ของ P₀ ของตัวเองเท่ากัน) · แต่ละเส้น = ผลรวมของทุกตัว
 ที่ราคา p0ᵢ × % / 100 · ค่า "ตอนนี้" = ผลรวมของแต่ละตัวที่ราคาตอนนี้ของตัวเอง ·
 % ตอนนี้ (เทียบเท่า) = 100 · exp(Σ fix_cᵢ · ln(pctᵢ / 100) / Σ fix_cᵢ) — ที่ % นี้เส้นเป้ารวม = ผลรวมเป้าตอนนี้พอดี
+
+กราฟเวลา (Eₙ เทียบต้นทุน option และ Cash Burn) · แกน x = เวลา UTC · ตัวเดียวหรือรวมพอร์ต (ผลรวมทุกตัว) · 3 เส้น:
+
+    trend       Eₙ เฉลี่ยต่อวัน     = Σ Ēᵢ · max(0, t − t0ᵢ)   Ēᵢ = Eᵢ(now) / วันตั้งแต่ t0ᵢ (วันปฏิทิน) · ต่อไปอนาคต (ประ)
+                                   Eᵢ = Eₙ ของ fill ล่าสุด (finalized_runs ของ bot) · ไม่วาดเส้น Eₙ เอง
+    ev_cost     ต้นทุน option (ev) = Σ leaps_shares · (cost − max(0, p0 − K))   ไม่คิด intrinsic ที่ P₀ · เส้นแนวนอนฝั่งบวก
+    cash_burn   Cash Burn สะสม    = min(0, min_{s ≤ t} Σ Aᵢ(s))   ติดลบหรือ 0 เท่านั้น ค้างค่าที่ลึกสุด
+
+t0ᵢ = เวลาแถวแรกของ chain (P₀) · ไม่มี → เวลา fill แรก · คืนทุน ev ที่ t* = now + (ev_cost − E(now)) / ΣĒᵢ วัน
 """
 from __future__ import annotations
 
@@ -39,7 +48,7 @@ import plotly.graph_objects as go
 
 from lego_charts import FONT_FAMILY, LINE, REFERENCE_DASH, theme_tokens
 
-GOAL_SCHEMA = 4                     # 4 = รวมพอร์ต "ตอนนี้" เป็นค่าเดียว (% เทียบเท่า) แทนช่วง
+GOAL_SCHEMA = 5                     # 5 = กราฟเวลา Eₙ / ต้นทุน option (ev) / Cash Burn
 PRICE, PCT = "price", "pct"
 ALL = "รวมพอร์ต"
 LINE_KEYS = ("goal", "stock_leg", "leaps_leg", "payoff", "payoff_e")
@@ -69,6 +78,7 @@ class LeapsCall:
     leaps_shares: float           # 100 × จำนวนสัญญา (multiplier × qty)
     delta: float | None
     expiry: date | None = None
+    cost: float | None = None     # ราคาที่จ่ายต่อหุ้น (cost_price ของ Webull) · None = Webull ไม่ส่งมา
 
 
 @dataclass(frozen=True)
@@ -80,6 +90,9 @@ class GoalInputs:
     shares: float
     calls: tuple[LeapsCall, ...] = ()
     excess: float | None = None   # Eₙ สะสมของ bot (chain) · None = ไม่มีเส้น Payoff + Eₙ
+    fills: tuple[tuple[pd.Timestamp, float, float], ...] = ()   # (เวลา, Aₙ, Eₙ) ของแต่ละ fill เรียงตาม seq
+    t0: pd.Timestamp | None = None                              # เวลาเริ่ม chain (P₀)
+    t0_source: str | None = None                                # "row" = แถวแรก · "fill" = fill แรก
 
     @property
     def stock_value(self) -> float:
@@ -120,6 +133,14 @@ class GoalInputs:
         """ราคาตอนนี้เป็น % ของ P₀"""
         return self.spot / self.p0 * 100.0
 
+    @property
+    def option_ev(self) -> float | None:
+        """ต้นทุน time value ของ LEAPS นับจาก P₀ = Σ leaps_shares · (cost − max(0, p0 − K))
+        · ไม่มี LEAPS → 0 · ขาไหนไม่มี cost → None (ไม่เดา)"""
+        if any(c.cost is None for c in self.calls):
+            return None
+        return float(sum(c.leaps_shares * (c.cost - max(0.0, self.p0 - c.strike)) for c in self.calls))
+
     def option_text(self) -> str:
         return " + ".join(f"{c.leaps_shares / 100:g}×C{c.strike:g}" for c in self.calls) or "—"
 
@@ -158,11 +179,15 @@ def goal_inputs(book) -> tuple[GoalInputs | None, str | None]:
             shares += float(leg.qty)
         elif leg.kind == "call" and leg.qty > 0 and _positive(leg.strike) is not None:
             calls.append(LeapsCall(float(leg.strike), float(leg.qty) * float(leg.multiplier),
-                                   None if leg.delta is None else float(leg.delta), leg.expiry))
+                                   None if leg.delta is None else float(leg.delta), leg.expiry,
+                                   _positive(getattr(leg, "cost", None))))
         else:
             return None, f"{symbol}: มี option ที่ไม่ใช่ long call (put หรือขาย) — แท็บนี้รองรับเฉพาะฝั่ง buy"
     excess = _finite(getattr(chain, "excess", None))
-    return GoalInputs(symbol, fix_c, p0, spot, shares, tuple(calls), excess), None
+    fills = tuple((pd.Timestamp(f.at), float(f.actual), float(f.excess)) for f in getattr(chain, "fills", ()) or ())
+    t0 = getattr(chain, "t0", None)
+    return GoalInputs(symbol, fix_c, p0, spot, shares, tuple(calls), excess, fills,
+                      None if t0 is None else pd.Timestamp(t0), getattr(chain, "t0_source", None)), None
 
 
 def collect(books: Sequence) -> tuple[list[GoalInputs], list[str]]:
@@ -527,3 +552,276 @@ def gap_figure(df: pd.DataFrame, axis: Axis, *, theme: str | None = None, height
     layout["margin"] = dict(l=8, r=24, t=56 if len(keys) > 1 else 24, b=8)
     fig.update_layout(**layout)
     return fig
+
+
+# ---------------------------------------------------------------- กราฟเวลา: Eₙ เทียบต้นทุน option (ev) และ Cash Burn
+
+TIME = "time"
+DAY = pd.Timedelta(days=1)
+MIN_SPAN = pd.Timedelta(hours=1)        # chain เพิ่งเริ่มไม่ถึง 1 ชม. → ยังไม่หาค่าเฉลี่ยต่อวัน
+HORIZON = pd.Timedelta(days=365)         # ไม่มีวันหมดอายุ LEAPS → ต่อเส้นเฉลี่ยไม่เกิน 1 ปี
+MAX_PROJECT_DAYS = 36500.0               # วันคืนทุนไกลกว่า 100 ปี = ไม่บอกวันที่
+COVERED_LEAD = 0.25                      # ไม่มีจุดให้ชน → ต่อเส้นเฉลี่ยอีก 25% ของช่วงที่ผ่านมา
+PROJECT_POINTS = 61
+EXPIRY_ZONE, EXPIRY_HOUR = "America/New_York", 16
+CASH_KEYS = ("trend", "ev_cost", "cash_burn")
+CASH_SHORT = {"trend": "เฉลี่ย", "ev_cost": "ต้นทุน ev", "cash_burn": "Cash Burn"}
+CASH_CONFIG = dict(CHART_CONFIG, toImageButtonOptions=dict(CHART_CONFIG["toImageButtonOptions"], filename="goal_cash"))
+
+
+def _utc(value) -> pd.Timestamp:
+    stamp = pd.Timestamp(value)
+    return stamp.tz_localize("UTC") if stamp.tzinfo is None else stamp.tz_convert("UTC")
+
+
+def _expiry_close(expiry: date) -> pd.Timestamp:
+    """LEAPS หมดอายุ 16:00 เวลา New York ของวันหมดอายุ (เป็น UTC)"""
+    return (pd.Timestamp(expiry).tz_localize(EXPIRY_ZONE) + pd.Timedelta(hours=EXPIRY_HOUR)).tz_convert("UTC")
+
+
+def _chain_steps(inputs: GoalInputs) -> pd.DataFrame:
+    """จุดขั้นบันไดของ chain: (t0, Aₙ 0, Eₙ 0) + ทุก fill · เวลาซ้ำใช้ค่าหลังสุด · index = เวลา UTC"""
+    points = [(_utc(inputs.t0), 0.0, 0.0)] if inputs.t0 is not None else []
+    points += [(_utc(at), float(actual), float(excess)) for at, actual, excess in inputs.fills]
+    if not points:
+        return pd.DataFrame(columns=["actual", "excess"], dtype=float)
+    df = pd.DataFrame(points, columns=[TIME, "actual", "excess"]).sort_values(TIME, kind="stable")
+    return df.groupby(TIME).last()
+
+
+def cash_timeline(items: Sequence[GoalInputs], now) -> pd.DataFrame:
+    """เวลารวมของทุกตัว (ค่าล่าสุดของแต่ละตัวที่ ≤ t · 0 ก่อน t0) → excess = Σ Eᵢ · actual = Σ Aᵢ ·
+    cash_burn = min(0, ค่าต่ำสุดสะสมของ actual) + จุดสุดท้ายที่ now · ไม่มีข้อมูลเวลาเลย → DataFrame ว่าง"""
+    steps = {i.symbol: _chain_steps(i) for i in items}
+    steps = {symbol: df for symbol, df in steps.items() if not df.empty}
+    columns = [TIME, "excess", "actual", "cash_burn"]
+    if not steps:
+        return pd.DataFrame(columns=columns)
+    out = pd.DataFrame({key: pd.concat({s: df[key] for s, df in steps.items()}, axis=1)
+                        .sort_index().ffill().fillna(0.0).sum(axis=1) for key in ("excess", "actual")})
+    now = _utc(now)
+    if out.index[-1] < now:
+        out.loc[now] = out.iloc[-1]
+    out["cash_burn"] = np.minimum(0.0, out["actual"].cummin())
+    out.index.name = TIME
+    return out.reset_index()[columns]
+
+
+@dataclass(frozen=True)
+class ChainPace:
+    """Eₙ เฉลี่ยต่อวันของ chain ตั้งแต่ t0 (P₀) ถึง now"""
+    symbol: str
+    t0: pd.Timestamp | None
+    t0_source: str | None
+    excess: float                  # Eₙ ของ fill ล่าสุด (ยังไม่มี fill = 0)
+    days: float | None             # วันปฏิทินตั้งแต่ t0
+    per_day: float | None          # excess / days · chain เพิ่งเริ่ม < 1 ชม. → None
+
+
+def chain_pace(inputs: GoalInputs, now) -> ChainPace:
+    steps = _chain_steps(inputs)
+    excess = float(steps["excess"].iloc[-1]) if not steps.empty else 0.0
+    if inputs.t0 is None:
+        return ChainPace(inputs.symbol, None, None, excess, None, None)
+    t0 = _utc(inputs.t0)
+    span = _utc(now) - t0
+    days = span / DAY
+    return ChainPace(inputs.symbol, t0, inputs.t0_source, excess, days, excess / days if span >= MIN_SPAN else None)
+
+
+def cash_summary(items: Sequence[GoalInputs], now) -> dict:
+    """ค่าของกราฟเวลา: Eₙ ตอนนี้ · Eₙ เฉลี่ยต่อวัน (Σ ของแต่ละตัว) · ต้นทุน ev · Cash Burn ลึกสุด · วันคืนทุน ev
+    · status: covered (Eₙ ≥ ต้นทุนแล้ว) · projected · after_expiry / after_horizon (ไม่ทัน) · never · None (ไม่มีต้นทุน)"""
+    now = _utc(now)
+    paces = [chain_pace(i, now) for i in items]
+    df = cash_timeline(items, now)
+    notes: list[str] = []
+    for inputs, pace in zip(items, paces):
+        if pace.t0 is None:
+            notes.append(f"{inputs.symbol}: ไม่มีเวลาเริ่ม chain (t0) และยังไม่มี fill — ไม่อยู่ในกราฟเวลา")
+            continue
+        if pace.per_day is None:
+            notes.append(f"{inputs.symbol}: chain เพิ่งเริ่มไม่ถึง 1 ชั่วโมง — ยังไม่คิด Eₙ เฉลี่ยต่อวัน")
+        if pace.t0_source == "fill":
+            notes.append(f"{inputs.symbol}: อ่านเวลาแถวแรกของ chain ไม่ได้ — t0 = เวลา fill แรก")
+        if inputs.excess is not None and inputs.fills and abs(pace.excess - inputs.excess) > 0.005:
+            notes.append(f"{inputs.symbol}: Eₙ ของ fill ล่าสุด {pace.excess:+,.2f} ≠ Eₙ ใน state {inputs.excess:+,.2f}"
+                         " — กราฟเวลาใช้ค่าของ fill")
+    timed = [p for p in paces if p.t0 is not None]
+    t0 = min((p.t0 for p in timed), default=None)
+    per_day = (None if not timed or any(p.per_day is None for p in timed)
+               else float(sum(p.per_day for p in timed)))
+    excess = None if df.empty else float(df["excess"].iloc[-1])
+    cash_burn = None if df.empty else float(df["cash_burn"].iloc[-1])      # ค่าต่ำสุดสะสม → ตัวสุดท้าย = ลึกสุด
+    calls = [c for i in items for c in i.calls]
+    if not calls:
+        ev_cost = None
+        notes.append("ไม่มี LEAPS — ไม่มีเส้นต้นทุน option")
+    elif any(i.option_ev is None for i in items):
+        ev_cost = None
+        missing = ", ".join(i.symbol for i in items if i.option_ev is None)
+        notes.append(f"{missing}: Webull ไม่ส่ง cost_price ของ LEAPS — ไม่วาดเส้นต้นทุน option")
+    else:
+        ev_cost = float(sum(i.option_ev for i in items))
+    expiries = [c.expiry for c in calls if c.expiry is not None]
+    expiry = _expiry_close(min(expiries)) if expiries else None
+    status, breakeven, end = None, None, now
+    if ev_cost is not None and excess is not None:
+        if excess >= ev_cost:
+            status = "covered"
+        elif per_day is None or per_day <= 0:
+            status = "never"
+        else:
+            need = (ev_cost - excess) / per_day
+            breakeven = (now + pd.Timedelta(days=need)).round("s") if need <= MAX_PROJECT_DAYS else None
+            cap = expiry if expiry is not None else now + HORIZON
+            if breakeven is not None and breakeven <= cap:
+                status, end = "projected", breakeven
+            else:
+                status, end = ("after_expiry" if expiry is not None else "after_horizon"), cap
+    if end <= now and per_day is not None and per_day > 0 and t0 is not None:
+        end = now + (now - t0) * COVERED_LEAD
+    return {"now": now, "t0": t0, "end": end, "days": None if t0 is None else (now - t0) / DAY,
+            "excess": excess, "per_day": per_day, "ev_cost": ev_cost, "cash_burn": cash_burn,
+            "breakeven": breakeven, "status": status, "expiry": expiry, "paces": paces, "notes": notes}
+
+
+def trend_value(summary: dict, at) -> float:
+    """เส้นเฉลี่ย ณ เวลา at = Σ Ēᵢ · max(0, at − t0ᵢ) (วัน) · ที่ now = Eₙ ตอนนี้"""
+    at = _utc(at)
+    return float(sum(p.per_day * max(0.0, (at - p.t0) / DAY) for p in summary["paces"]
+                     if p.t0 is not None and p.per_day is not None))
+
+
+def trend_points(summary: dict, times: Iterable) -> tuple[list, list, list, list] | None:
+    """(x, y) ของเส้นเฉลี่ยช่วงที่ผ่านมา (t0 → now) และช่วงคาด (now → end) · ไม่มีค่าเฉลี่ย → None"""
+    if summary["per_day"] is None or summary["t0"] is None:
+        return None
+    now, end = summary["now"], summary["end"]
+    starts = [p.t0 for p in summary["paces"] if p.t0 is not None]
+    past = sorted({_utc(t) for t in times if summary["t0"] <= _utc(t) <= now} | set(starts) | {now})
+    future = list(pd.date_range(now, end, periods=PROJECT_POINTS)) if end > now else []
+    return (past, [trend_value(summary, t) for t in past], future, [trend_value(summary, t) for t in future])
+
+
+def breakeven_text(summary: dict) -> str:
+    """วันคืนทุน ev เป็นข้อความ (ใช้ทั้ง subtitle และสมการ)"""
+    status, when, expiry = summary["status"], summary["breakeven"], summary["expiry"]
+    day = (lambda t: t.strftime("%Y-%m-%d"))
+    if status is None:
+        return "— (ไม่มีต้นทุน ev)"
+    if status == "covered":
+        return "Eₙ ครอบคลุมต้นทุน ev แล้ว"
+    if status == "never":
+        return "ยังคาดไม่ได้ (ไม่มี Eₙ เฉลี่ยต่อวันที่เป็นบวก)"
+    left = "" if when is None else f"คาด {day(when)} (อีก {(when - summary['now']) / DAY:,.0f} วัน)"
+    if status == "projected":
+        return left
+    limit = (f"LEAPS หมดอายุ {day(expiry)}" if status == "after_expiry" else "1 ปี")
+    return f"{left} — ไม่ทัน{limit}" if left else f"ไม่ทัน{limit}"
+
+
+def cash_figure(df: pd.DataFrame, summary: dict, *, theme: str | None = None,
+                title: str | None = None, subtitle: str | None = None, height: int = 520) -> go.Figure:
+    """3 เส้นตามเวลา: Eₙ เฉลี่ยต่อวัน (ทึบถึงตอนนี้ แล้วประไปอนาคต) · ต้นทุน option ev (แนวนอนฝั่งบวก)
+    · Cash Burn สะสม (ขั้นบันได ≤ 0) · เส้นตั้ง t0 / ตอนนี้ / คืนทุน ev"""
+    tok = theme_tokens(theme)
+    colors = {"trend": tok["series"][6], "ev_cost": tok["text_secondary"], "cash_burn": STATUS["critical"]}
+    per_day = summary["per_day"]
+    names = {"trend": ("Eₙ เฉลี่ยต่อวัน" if per_day is None else f"Eₙ เฉลี่ย {per_day:,.2f} USD/วัน") + " (ตั้งแต่ t0 P₀)",
+             "ev_cost": "ต้นทุน option (ev ไม่คิด intrinsic)", "cash_burn": "Cash Burn สะสม (Aₙ ต่ำสุด, ≤ 0)"}
+    x = pd.to_datetime(df[TIME], utc=True)
+    trend = trend_points(summary, x)
+    future = trend[2] if trend else []
+    grid = sorted(set(x) | set(future))
+    x_end = max([*grid, summary["end"]])
+    fig = go.Figure()
+
+    def line(key, xs, ys, rank, **style):
+        fig.add_trace(go.Scatter(x=xs, y=ys, name=names[key], mode="lines", legendrank=1000 + rank,
+                                 legendgroup=key, hovertemplate=f"<b>%{{y:,.2f}}</b> USD  {names[key]}<extra></extra>",
+                                 **style))
+
+    if trend:
+        line("trend", trend[0], trend[1], 1, line=dict(color=colors["trend"], width=LINE["excess"] + 0.5))
+        if future:
+            fig.add_trace(go.Scatter(x=future, y=trend[3], name=f"{names['trend']} · คาด", mode="lines",
+                                     legendgroup="trend", showlegend=False,
+                                     line=dict(color=colors["trend"], width=LINE["excess"] + 0.5, dash="dash"),
+                                     hovertemplate=f"<b>%{{y:,.2f}}</b> USD  {names['trend']} · คาด<extra></extra>"))
+    ev = summary["ev_cost"]
+    if ev is not None:
+        line("ev_cost", grid, [ev] * len(grid), 2,
+             line=dict(color=colors["ev_cost"], width=LINE["reference"] + 1.0, dash=REFERENCE_DASH))
+    line("cash_burn", x, df["cash_burn"], 3, fill="tozeroy", fillcolor=_rgba(colors["cash_burn"], ZONE_ALPHA * 2),
+         line=dict(color=colors["cash_burn"], width=LINE["total"], shape="hv"))
+
+    values = [0.0, *df["cash_burn"], *(trend[1] + trend[3] if trend else []),
+              *([ev] if ev is not None else [])]
+    finite = [float(v) for v in values if np.isfinite(v)]
+    lo, hi = min(finite), max(finite)
+    pad = (hi - lo) * 0.08 or 1.0
+    y_range = [lo - pad, hi + pad]
+    label_font = dict(family=FONT_FAMILY, size=12, color=tok["text_secondary"])
+    marks = [(summary["t0"], "t0 · P₀", "dash", False), (summary["now"], "ตอนนี้", "solid", True)]
+    if summary["status"] == "projected":
+        marks.append((summary["breakeven"], f"คืนทุน ev {summary['breakeven']:%Y-%m-%d}", "dot", True))
+    for at, text, dash, strong in marks:
+        if at is None:
+            continue
+        right = at >= x_end                  # เส้นที่ขอบขวา (คืนทุน = ปลายกราฟ) → ป้ายอยู่ซ้ายเส้น
+        fig.add_shape(type="line", x0=at, x1=at, xref="x", y0=0, y1=1, yref="paper",
+                      line=dict(color=tok["axis"] if strong else tok["grid"], width=1, dash=dash))
+        fig.add_annotation(x=at, y=1, xref="x", yref="paper", text=text, showarrow=False,
+                           xanchor="right" if right else "left", yanchor="top", xshift=-4 if right else 4,
+                           font=label_font)
+    if summary["status"] == "projected":
+        fig.add_trace(go.Scatter(x=[summary["breakeven"]], y=[ev], mode="markers", showlegend=False,
+                                 hoverinfo="skip", marker=dict(size=10, color=tok["surface"],
+                                                               line=dict(color=colors["trend"], width=2))))
+    axis = Axis(TIME, "เวลา (UTC)", "<b>%{x|%Y-%m-%d %H:%M}</b> UTC", 0.0, 0.0)
+    layout = _layout(tok, axis, height=height, title=title, subtitle=subtitle, y_title="USD (model)",
+                     y_range=y_range)
+    span = x_end - (summary["t0"] or x.iloc[0])
+    layout["xaxis"].update(type="date", range=[(summary["t0"] or x.iloc[0]) - span * 0.01, x_end + span * 0.01],
+                           ticksuffix="", hoverformat="%Y-%m-%d %H:%M")
+    layout["margin"]["r"] = 136                                  # ป้ายค่าปลายเส้น เช่น "Cash Burn -1,591"
+    fig.update_layout(**layout)
+    ends = []
+    if trend:
+        ends.append(("trend", trend_value(summary, x_end)))
+    if ev is not None:
+        ends.append(("ev_cost", ev))
+    ends.append(("cash_burn", summary["cash_burn"]))
+    ends = [(k, v) for k, v in ends if v is not None]
+    for (key, value), y in zip(ends, _spread([v for _, v in ends], (y_range[1] - y_range[0]) * 0.06)):
+        fig.add_annotation(x=x_end, y=y, text=f"{CASH_SHORT[key]} <b>{value:+,.0f}</b>", showarrow=False,
+                           xanchor="left", xshift=8, font=dict(family=FONT_FAMILY, size=12, color=colors[key]))
+    return fig
+
+
+def cash_equation_text(items: Sequence[GoalInputs], summary: dict) -> str:
+    """สมการของกราฟเวลาพร้อมค่าจริง (ต่อท้ายข้อความใน expander สมการ)"""
+    width = max([len(i.symbol) for i in items] + [3])
+    stamp = (lambda t: "—" if t is None else t.strftime("%Y-%m-%d %H:%M"))
+    rows = []
+    for inputs, pace in zip(items, summary["paces"]):
+        source = {"row": "แถวแรก", "fill": "fill แรก"}.get(pace.t0_source, "—")
+        avg = ("—" if pace.per_day is None else
+               f"{pace.excess:+,.2f} / {pace.days:,.2f} วัน = {pace.per_day:+,.2f} USD/วัน")
+        terms = " + ".join(f"{c.leaps_shares:g} · ({'—' if c.cost is None else f'{c.cost:,.4g}'} − "
+                           f"max(0, {inputs.p0:,.4g} − {c.strike:g}))" for c in inputs.calls) or "0 (ไม่มี LEAPS)"
+        rows += [f"  {inputs.symbol:<{width}}  t0 {stamp(pace.t0)} UTC ({source}) · Ē = {avg}",
+                 f"  {'':<{width}}  ev = {terms} = {_fmt(inputs.option_ev)}"]
+    return "\n".join([
+        f"กราฟเวลา — Eₙ เทียบต้นทุน option (ev) และ Cash Burn (ณ {stamp(summary['now'])} UTC)",
+        "  Eₙ(t)        = Σ Eₙ ของ fill ล่าสุดที่ ≤ t ของแต่ละตัว (finalized_runs ของ bot · 0 ก่อน t0)",
+        "  Ē            = Σ Eₙ(now)ᵢ / วันตั้งแต่ t0ᵢ (วันปฏิทิน)     เส้นเฉลี่ย(t) = Σ Ēᵢ · max(0, t − t0ᵢ)",
+        "  ev_cost      = Σ leaps_shares · (cost − max(0, p0 − K))   (ไม่คิด intrinsic ที่ P₀)",
+        "  cash_burn(t) = min(0, min_{s ≤ t} Σ Aₙ(s))",
+        "",
+        *rows,
+        f"  {'รวม':<{width}}  Eₙ {_fmt(summary['excess'])} · Ē {_fmt(summary['per_day'])} USD/วัน · "
+        f"ev_cost {_fmt(summary['ev_cost'])} · cash_burn {_fmt(summary['cash_burn'])}",
+        f"  คืนทุน ev: {breakeven_text(summary)}",
+    ])

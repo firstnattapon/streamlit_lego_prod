@@ -11,6 +11,7 @@
   🎯 Payoff           — Payoff = ขาหุ้น + ขา LEAPS (+ Eₙ ของ bot) เทียบเป้า FIX_C·ln(x/P₀) จากสถานะจริง ต่อตัว
                         และรวมพอร์ต (สูตร/กราฟ: lego_goal.py · position จริง: lego_webull_read.py GET อย่างเดียว
                         4 path ไม่ส่ง order ไม่สร้าง token + lego_positions.py · chain ของ bot จาก PROD) · ยังไม่คิด premium
+                        + กราฟเวลา Eₙ เฉลี่ยต่อวัน · ต้นทุน option (ev) · Cash Burn
   🎓 Rebalancing 101  — playground เชิงสอน "gated demo (DNA gate + บัญชีแบบแช่แข็ง)"
                         ไม่ต้องมี Firebase: สุ่มราคา -> เดิน ledger gated_theoretical_v2
                         เห็นว่ารอบ "จำนวนสั่ง = 0" (pass/แช่แข็ง) ถูกบันทึกอย่างไร
@@ -101,7 +102,9 @@ import lego_webull_read as _lego_webull_read
 
 if getattr(_lego_webull_read, "SNAPSHOT_SCHEMA", 0) < 2:
     _lego_webull_read = importlib.reload(_lego_webull_read)
-if getattr(goal, "GOAL_SCHEMA", 0) < 4:          # 4 = รวมพอร์ต "ตอนนี้" เป็น % เทียบเท่าค่าเดียว
+if getattr(positions, "POSITIONS_SCHEMA", 0) < 2:   # 2 = LegoChain มี fills + t0 (กราฟเวลา)
+    positions = importlib.reload(positions)
+if getattr(goal, "GOAL_SCHEMA", 0) < 5:          # 5 = กราฟเวลา Eₙ / ต้นทุน option (ev) / Cash Burn
     goal = importlib.reload(goal)
 
 from lego_webull_read import WebullReadError, fetch_account_snapshot, redact
@@ -729,6 +732,12 @@ GOAL_NOTE = ("ยังไม่คิด premium: ขา LEAPS = intrinsic เ�
 GOAL_CHART_HINT = ("ตอนเริ่มเปิดเฉพาะเป้ากับ Payoff + Eₙ · คลิกชื่อเส้นใน legend = ซ่อน/โชว์ (ดับเบิลคลิก = ดูเส้นเดียว) · "
                    "แกน y พอดีกับช่วงตั้งแต่ 25% ของ P₀ (ซ้ายกว่านั้น ln ลงลึก) · ปุ่ม Autoscale = ดูทั้งเส้น · "
                    "ดับเบิลคลิกกราฟ = กลับมุมมองเริ่มต้น")
+GOAL_CASH_NOTE = ("Eₙ และ Aₙ = ค่าที่ bot บันทึกต่อ fill (execution_cashflow.finalized_runs = Order audit ที่ FILLED) · "
+                  "เส้นเฉลี่ยผ่าน Eₙ ตอนนี้ = การ์ด Eₙ สะสม (bot) (แท็บ Live ปรับ genesis baseline จึงอาจต่างเล็กน้อย) · "
+                  "t0 = เวลาแถวแรกของ chain (ราคา P₀) · ค่าเฉลี่ยใช้วันปฏิทิน (รวมวันตลาดปิด) · "
+                  "ต้นทุน ev ใช้ cost_price ของ LEAPS ใน Webull ลบ intrinsic ที่ P₀ · Cash Burn ติดลบเท่านั้น "
+                  "และค้างค่าที่ลึกที่สุด (รวมพอร์ต = รวม Aₙ ทุกตัวก่อน)")
+CHAIN_START_TTL_S = 3600                         # t0 ของ chain ไม่เปลี่ยน — อ่าน webull_lego_rows ทั้ง node ชั่วโมงละครั้ง
 _RUN_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 
 
@@ -751,9 +760,15 @@ def _webull_snapshot(fingerprint: str) -> dict:
         environment=str(st.secrets.get("WEBULL_ENVIRONMENT", "prod")))
 
 
+@st.cache_data(ttl=CHAIN_START_TTL_S, show_spinner=False)
+def _chain_starts(keys: tuple[str, ...]) -> dict:
+    """t0 (เวลาแถวแรก) ของ chain ใน keys — RTDB ไม่มี index จึงต้องอ่าน webull_lego_rows ทั้ง node (แคชแยก ไม่ล้างตอนรีเฟรช)"""
+    return positions.chain_starts(_ref("webull_lego_rows").get() or {}, keys)
+
+
 @st.cache_data(ttl=WEBULL_TTL_S, show_spinner=False)
 def _bot_chains() -> tuple[dict, dict]:
-    """PROD เท่านั้น: webull_lego_state + แถวล่าสุด 1 แถวต่อ chain (ไม่อ่าน webull_lego_rows ทั้ง node)"""
+    """PROD เท่านั้น: webull_lego_state + แถวล่าสุด 1 แถวต่อ chain + t0 ของ chain (แคชแยก ชั่วโมงละครั้ง)"""
     if not (_has_secret("FIREBASE_SA_JSON") and _prod_url()):
         return {}, {}
     _init()
@@ -764,7 +779,11 @@ def _bot_chains() -> tuple[dict, dict]:
             run_id = pointer.get("last_run_id") if isinstance(pointer, dict) else None
             if isinstance(run_id, str) and _RUN_ID.fullmatch(run_id):
                 rows[chain_key] = _ref(f"webull_lego_rows/{run_id}").get()
-    return positions.lego_chains(state, rows)
+    try:                         # อ่านไม่ได้ → t0 = เวลา fill แรก (กราฟเวลาบอกเหตุผล)
+        starts = _chain_starts(tuple(sorted(str(key) for key in state))) if isinstance(state, dict) else {}
+    except Exception:
+        starts = {}
+    return positions.lego_chains(state, rows, starts)
 
 
 def _webull_status_line(snap: dict) -> str:
@@ -883,13 +902,39 @@ def _render_goal(snap: dict, chains: dict, chain_issues: dict, now) -> None:
                 "ตอนเริ่มเปิดเฉพาะ ห่างจากเป้า + Eₙ (อีกเส้นคลิกชื่อใน legend)")
     st.plotly_chart(goal.gap_figure(df, axis, theme=theme), theme=None, config=config, key="goal_gap_chart")
     st.caption(GOAL_NOTE)
+    cash = _goal_cash_chart(picked, combined, now, theme)
     with st.expander("สมการ (ชื่อตัวแปร + ค่าจริงที่ราคาตอนนี้)", expanded=True):
-        st.code(equations, language=None)
+        st.code(equations if cash is None else f"{equations}\n\n{goal.cash_equation_text(picked, cash)}",
+                language=None)
     with st.expander("ทุกตัว (ค่าที่ราคาตอนนี้)"):
         table = goal.overview_table(items)
         st.dataframe(table, hide_index=True, column_config={
             col: st.column_config.NumberColumn(format="%.2f") for col in table.columns if col not in ("ตัว", "LEAPS")})
     _goal_notes(issues + notes)
+
+
+def _goal_cash_chart(picked: list, combined: bool, now, theme) -> dict | None:
+    """กราฟเวลา: Eₙ เฉลี่ยต่อวัน (ต่อไปถึงวันคืนทุน) · ต้นทุน option (ev) · Cash Burn สะสม"""
+    summary = goal.cash_summary(picked, now)
+    df = goal.cash_timeline(picked, now)
+    name = "รวมพอร์ต" if combined else picked[0].symbol
+    st.markdown(f"**{name} · Eₙ เทียบต้นทุน option (ev) และ Cash Burn ตามเวลา**")
+    if df.empty:
+        st.caption("ยังไม่มีเวลาเริ่ม chain หรือ fill ของ bot จึงยังไม่มีกราฟเวลา")
+        _goal_notes(summary["notes"])
+        return None
+    per_day = summary["per_day"]
+    subtitle = (f"Eₙ {_signed(summary['excess'])} · เฉลี่ย "
+                + ("—" if per_day is None else f"{per_day:+,.2f} USD/วัน ใน {summary['days']:,.1f} วันตั้งแต่ t0")
+                + f" · ต้นทุน ev {_signed(summary['ev_cost'])} · คืนทุน ev: {goal.breakeven_text(summary)}"
+                + f" · Cash Burn {_signed(summary['cash_burn'])}")
+    fig = goal.cash_figure(df, summary, theme=theme, title=f"{name} · Eₙ เทียบต้นทุน option (ev)", subtitle=subtitle)
+    config = dict(goal.CASH_CONFIG, toImageButtonOptions=dict(goal.CASH_CONFIG["toImageButtonOptions"],
+                                                              filename=f"goal_cash_{'portfolio' if combined else name}"))
+    st.plotly_chart(fig, theme=None, config=config, key="goal_cash_chart")
+    st.caption(GOAL_CASH_NOTE)
+    _goal_notes(summary["notes"])
+    return summary
 
 
 @st.fragment
