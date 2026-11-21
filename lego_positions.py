@@ -3,6 +3,8 @@
 ชั้นข้อมูลของแท็บ 🎯 Payoff (สูตรและกราฟอยู่ใน lego_goal.py):
   parse_positions  อ่าน positions ของ Webull (OpenAPI v3 ``legs`` และแบบ MCP ``items``) → Leg ต่อขา
   lego_chains      อ่าน ``webull_lego_state`` + แถวล่าสุดของ chain → FIX_C, P₀, Eₙ (fail closed)
+                   + fill ที่ bot บันทึก (``execution_cashflow.finalized_runs``) และ t0 ของ chain
+  chain_starts     เวลาแถวแรก (version ต่ำสุด) ของแต่ละ chain จาก ``webull_lego_rows`` = t0
   build_books      รวมเป็น SymbolBook ต่อ symbol (ราคา, ขา, chain) · IV / delta ของ option จาก Webull
                    หรือแก้จาก mark ด้วย Black-Scholes
 ข้อมูลที่ขาดหรือไม่ตรงกัน → บอกเหตุผล ไม่ประมาณ
@@ -18,6 +20,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
+POSITIONS_SCHEMA = 2             # 2 = LegoChain มี fills + t0 (reload guard ของ streamlit_app)
 RISK_FREE = 0.04                 # r ของ Black-Scholes · ไม่มีปันผล
 NEW_YORK = ZoneInfo("America/New_York")
 US_CLOSE = time(16, 0)           # option หมดอายุ 16:00 เวลา New York
@@ -296,6 +299,15 @@ def years_to_expiry(expiry: date, now: datetime) -> float:
 # ---------------------------------------------------------------- state ของ bot (PROD · v3)
 
 @dataclass(frozen=True)
+class Fill:
+    """fill หนึ่งครั้งที่ bot บันทึกใน ``execution_cashflow.finalized_runs`` (Aₙ / Eₙ หลัง fill นี้)"""
+    at: pd.Timestamp
+    seq: int
+    actual: float
+    excess: float
+
+
+@dataclass(frozen=True)
 class LegoChain:
     """ค่าจาก ``webull_lego_state`` ของ chain ล่าสุดของ symbol (+ FIX_C จากแถวล่าสุดของ chain)"""
     chain_key: str
@@ -309,6 +321,9 @@ class LegoChain:
     r_basis: float
     excess: float
     updated_at: str
+    fills: tuple[Fill, ...] = ()           # เรียงตาม seq
+    t0: pd.Timestamp | None = None         # เวลาแถวแรกของ chain (P₀) · ไม่มี → เวลา fill แรก
+    t0_source: str | None = None           # "row" | "fill"
 
 
 def _stamp(value) -> pd.Timestamp:
@@ -316,10 +331,55 @@ def _stamp(value) -> pd.Timestamp:
     return pd.Timestamp.min.tz_localize("UTC") if pd.isna(stamp) else stamp
 
 
-def lego_chains(state_raw, rows_by_chain: Mapping | None) -> tuple[dict[str, LegoChain], dict[str, str]]:
+def _time(value) -> pd.Timestamp | None:
+    """เวลา UTC จากข้อความ ISO · อ่านไม่ได้ → None"""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    stamp = pd.to_datetime(value, utc=True, errors="coerce", format="mixed")
+    return None if pd.isna(stamp) else stamp
+
+
+def parse_fills(runs) -> tuple[Fill, ...]:
+    """``finalized_runs`` (run_id → fill) → Fill เรียงตาม seq แล้วเวลา · รายการที่เวลา/ตัวเลขอ่านไม่ได้ถูกข้าม"""
+    fills = []
+    for run in (runs or {}).values() if isinstance(runs, Mapping) else ():
+        if not isinstance(run, Mapping):
+            continue
+        at, actual, excess = _time(run.get("at")), _num(run.get("actual_cumulative")), _num(run.get("excess"))
+        seq = _num(run.get("seq"))
+        if at is None or actual is None or excess is None:
+            continue
+        fills.append(Fill(at, int(seq) if seq is not None else 0, actual, excess))
+    return tuple(sorted(fills, key=lambda f: (f.seq, f.at)))
+
+
+TIME_COL = "เวลา (UTC)"
+
+
+def chain_starts(rows_raw, keys: Iterable[str]) -> dict[str, str]:
+    """t0 ของแต่ละ chain ใน ``keys`` = "เวลา (UTC)" ของแถว ``version`` ต่ำสุด (แถว committed เท่านั้น)
+    · chain ที่ไม่มีแถวหรือเวลาอ่านไม่ได้ → ไม่ใส่"""
+    wanted = set(keys)
+    first: dict[str, tuple[float, str]] = {}
+    rows = rows_raw.values() if isinstance(rows_raw, Mapping) else (rows_raw or ())
+    for row in rows:
+        if not isinstance(row, Mapping) or row.get("chain_key") not in wanted or row.get("committed") is not True:
+            continue
+        version, stamp = _num(row.get("version")), row.get(TIME_COL)
+        if version is None or _time(stamp) is None:
+            continue
+        key = row["chain_key"]
+        if key not in first or version < first[key][0]:
+            first[key] = (version, stamp)
+    return {key: stamp for key, (_, stamp) in first.items()}
+
+
+def lego_chains(state_raw, rows_by_chain: Mapping | None,
+                starts: Mapping[str, str] | None = None) -> tuple[dict[str, LegoChain], dict[str, str]]:
     """symbol → LegoChain ของ chain ที่ ``updated_at`` ล่าสุด · ค่าที่จำเป็นหาย/ไม่ finite → ไม่ใส่ (fail closed)
 
     ``rows_by_chain``: chain_key → แถวล่าสุดของ chain (``webull_lego_rows/<last_run_id>``)
+    ``starts``: chain_key → เวลาแถวแรกของ chain (``chain_starts``) · ไม่มี → t0 = เวลา fill แรก
     คืน (chains, เหตุผลของ symbol ที่ใช้ไม่ได้)
     """
     candidates: dict[str, list[tuple[pd.Timestamp, str, Mapping]]] = {}
@@ -362,11 +422,16 @@ def lego_chains(state_raw, rows_by_chain: Mapping | None) -> tuple[dict[str, Leg
             issues[symbol] = f"{symbol}: Eₙ ≠ Aₙ − R_basis ใน state (ไม่ใช่ v3) — ไม่ใช้ chain นี้"
             continue
         p0 = _num(state.get("p0"))
+        fills = parse_fills(cash.get("finalized_runs"))
+        t0, t0_source = _time((starts or {}).get(key)), "row"
+        if t0 is None:
+            t0, t0_source = (fills[0].at, "fill") if fills else (None, None)
         chains[symbol] = LegoChain(
             chain_key=key, symbol=symbol, fix_c=fields["FIX_C (แถวล่าสุด)"],
             leaps_shares=fields["leaps_shares"], real_holdings=fields["หุ้นจริง (prev_holdings)"],
             p0=p0 if p0 and p0 > 0 else None, p_acted=fields["P_acted"], actual=fields["Aₙ"],
-            r_basis=fields["R_basis"], excess=fields["Eₙ"], updated_at=str(state.get("updated_at") or ""))
+            r_basis=fields["R_basis"], excess=fields["Eₙ"], updated_at=str(state.get("updated_at") or ""),
+            fills=fills, t0=t0, t0_source=t0_source)
     return chains, issues
 
 

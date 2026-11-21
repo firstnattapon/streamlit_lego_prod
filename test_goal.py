@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pandas as pd
 import pytest
 
 import lego_goal as goal
@@ -304,7 +305,7 @@ def test_the_goal_tab_shows_weights_charts_and_equations(monkeypatch):
     assert picker.value == "AAA" and list(picker.options) == ["AAA"]  # ตัวเดียว → ไม่มีรวมพอร์ต
     assert [t.label for t in app.tabs][:5] == ["📊 Live Dashboard", "🎯 Payoff", "🎓 Rebalancing 101", "🌐 Web Apps",
                                                "⚡ Cheat Sheet"]          # 🎯 Payoff ต่อจาก Live
-    assert len(app.get("plotly_chart")) == 3                          # 101 + 🎯 Payoff (กราฟหลัก + ห่างจากเป้า)
+    assert len(app.get("plotly_chart")) == 4          # 101 + 🎯 Payoff (กราฟหลัก + ห่างจากเป้า + กราฟเวลา)
 
 
 def test_the_goal_tab_has_a_portfolio_choice(monkeypatch):
@@ -330,3 +331,155 @@ def test_without_bot_state_the_goal_tab_explains_why(monkeypatch):
     assert not app.exception and not app.error
     assert any(i.value.startswith("ยังไม่มีตัวที่คำนวณได้") for i in app.info)
     assert any("AAA: ไม่มี chain ของ bot ใน Firebase PROD (ต้องใช้ FIX_C และ P₀)" in c.value for c in app.caption)
+
+
+# ---------------------------------------------------------------- กราฟเวลา: Eₙ · เฉลี่ยต่อวัน · ต้นทุน option (ev) · Cash Burn
+
+T_NOW = pd.Timestamp(NOW)
+DAY = pd.Timedelta(days=1)
+
+
+def timed(symbol="AAA", *, t0_days=4.0, fills=(), calls=(), excess=None, source="row"):
+    """GoalInputs ที่มี t0 = NOW − t0_days และ fill (วันหลัง t0, Aₙ, Eₙ)"""
+    t0 = None if t0_days is None else T_NOW - t0_days * DAY
+    rows = tuple((t0 + d * DAY, a, e) for d, a, e in fills)
+    last = rows[-1][2] if rows else 0.0
+    return goal.GoalInputs(symbol, 1500.0, 10.0, 9.0, 60.0, tuple(calls), last if excess is None else excess,
+                           rows, t0, source if t0 is not None else None)
+
+
+CALL_C7 = goal.LeapsCall(7.0, 100.0, 0.8, date(2027, 5, 21), 4.90)
+
+
+def test_cash_burn_holds_the_deepest_negative_actual():
+    """ตัวอย่างของผู้ใช้: Aₙ 0 −500 −400 −300 −1200 −500 → Cash Burn 0 −500 −500 −500 −1200 −1200"""
+    actual = [-500, -400, -300, -1200, -500]
+    df = goal.cash_timeline([timed(fills=[(0.5 * (n + 1), a, 1.0) for n, a in enumerate(actual)])], T_NOW)
+    assert df["actual"].tolist() == [0, -500, -400, -300, -1200, -500, -500]            # + จุดตอนนี้
+    assert df["cash_burn"].tolist() == [0, -500, -500, -500, -1200, -1200, -1200]
+    up = goal.cash_timeline([timed(fills=[(1, 300.0, 1.0), (2, -50.0, 2.0)])], T_NOW)
+    assert up["cash_burn"].tolist() == [0, 0, -50, -50]                                   # Aₙ บวก → 0 (ไม่เกิน 0)
+
+
+def test_portfolio_cash_burn_is_the_running_min_of_the_summed_actual():
+    x = timed("X", t0_days=4, fills=[(1, -100.0, 3.0), (2, 0.0, 5.0)])
+    y = timed("Y", t0_days=1, fills=[(0.5, -80.0, 2.0)])                  # เริ่มทีหลัง: ก่อน t0 = 0
+    df = goal.cash_timeline([x, y], T_NOW)
+    assert df["actual"].tolist() == [0, -100, 0, 0, -80, -80]
+    assert df["excess"].tolist() == [0, 3, 5, 5, 7, 7]                     # Eₙ ผลรวมทุกตัว ณ เวลา t
+    assert df["cash_burn"].min() == -100                                   # ไม่ใช่ −100 + −80 ของแต่ละตัว
+    assert df[goal.TIME].iloc[-1] == T_NOW
+
+
+def test_option_ev_counts_only_time_value_from_p0():
+    inputs = inputs_of(aaa_book())                                         # C7 · cost 4.90 · P₀ 10
+    assert inputs.calls[0].cost == 4.9 and inputs.option_ev == pytest.approx(100 * (4.90 - (10 - 7))) == 190.0
+    otm = timed(calls=[goal.LeapsCall(12.0, 200.0, 0.4, None, 1.5)])     # ต่ำกว่า strike ที่ P₀ → ทั้งก้อนเป็น ev
+    assert otm.option_ev == pytest.approx(300.0)
+    missing = timed(calls=[goal.LeapsCall(7.0, 100.0, 0.8, None, None)], fills=[(1, -10.0, 4.0)])
+    assert missing.option_ev is None
+    summary = goal.cash_summary([missing], T_NOW)
+    assert summary["ev_cost"] is None and summary["status"] is None
+    assert any("ไม่ส่ง cost_price" in n for n in summary["notes"])
+    assert any("ไม่มี LEAPS" in n for n in goal.cash_summary([timed(fills=[(1, 0.0, 1.0)])], T_NOW)["notes"])
+
+
+def test_the_daily_average_line_meets_the_option_cost_at_the_breakeven_day():
+    inputs = timed(t0_days=4, fills=[(1, -60.0, 8.0), (3, -100.0, 20.0)], calls=[CALL_C7])
+    s = goal.cash_summary([inputs], T_NOW)
+    assert s["excess"] == 20.0 and s["per_day"] == pytest.approx(5.0) and s["ev_cost"] == pytest.approx(190.0)
+    assert s["cash_burn"] == -100.0 and s["days"] == pytest.approx(4.0)
+    assert goal.trend_value(s, T_NOW) == pytest.approx(20.0)              # เส้นเฉลี่ยผ่าน Eₙ ตอนนี้
+    assert goal.trend_value(s, T_NOW - 4 * DAY) == 0.0                     # เริ่มที่ 0 ที่ t0
+    assert s["status"] == "projected" and s["breakeven"] == T_NOW + 34 * DAY   # (190 − 20) / 5
+    assert goal.trend_value(s, s["breakeven"]) == pytest.approx(190.0) and s["end"] == s["breakeven"]
+    assert goal.breakeven_text(s) == "คาด 2026-12-21 (อีก 34 วัน)"
+
+
+def test_breakeven_states():
+    covered = goal.cash_summary([timed(fills=[(1, 0.0, 250.0)], calls=[CALL_C7])], T_NOW)
+    assert covered["status"] == "covered" and covered["end"] > T_NOW
+    slow = goal.cash_summary([timed(t0_days=400, fills=[(1, 0.0, 1.0)], calls=[CALL_C7])], T_NOW)
+    assert slow["status"] == "after_expiry" and slow["end"] == pd.Timestamp("2027-05-21 20:00", tz="UTC")
+    assert "ไม่ทันLEAPS หมดอายุ 2027-05-21" in goal.breakeven_text(slow)
+    losing = goal.cash_summary([timed(fills=[(1, 0.0, -3.0)], calls=[CALL_C7])], T_NOW)
+    assert losing["status"] == "never" and losing["end"] == T_NOW
+    fresh = goal.cash_summary([timed(t0_days=0.01, calls=[CALL_C7])], T_NOW)   # < 1 ชม.
+    assert fresh["per_day"] is None and any("ไม่ถึง 1 ชั่วโมง" in n for n in fresh["notes"])
+
+
+def test_the_portfolio_average_sums_each_chain_from_its_own_t0():
+    x = timed("X", t0_days=10, fills=[(1, 0.0, 50.0)])                  # 5 / วัน
+    y = timed("Y", t0_days=2, fills=[(1, 0.0, 10.0)])                   # 5 / วัน
+    s = goal.cash_summary([x, y], T_NOW)
+    assert s["per_day"] == pytest.approx(10.0) and s["t0"] == T_NOW - 10 * DAY
+    assert goal.trend_value(s, T_NOW) == pytest.approx(60.0) == s["excess"]
+    assert goal.trend_value(s, T_NOW - 2 * DAY) == pytest.approx(40.0)    # ก่อน t0 ของ Y นับแค่ X
+
+
+def test_no_t0_and_no_fill_means_no_time_chart():
+    lonely = timed(t0_days=None)
+    assert goal.cash_timeline([lonely], T_NOW).empty
+    assert any("ไม่มีเวลาเริ่ม chain" in n for n in goal.cash_summary([lonely], T_NOW)["notes"])
+    stale = timed(fills=[(1, 0.0, 5.0)], excess=7.0, source="fill")
+    notes = goal.cash_summary([stale], T_NOW)["notes"]
+    assert any("t0 = เวลา fill แรก" in n for n in notes) and any("≠ Eₙ ใน state" in n for n in notes)
+
+
+def test_the_cash_figure_has_the_four_lines():
+    inputs = timed(t0_days=4, fills=[(1, -60.0, 8.0), (2, -150.0, 14.0), (3, -100.0, 20.0)], calls=[CALL_C7])
+    s = goal.cash_summary([inputs], T_NOW)
+    df = goal.cash_timeline([inputs], T_NOW)
+    fig = goal.cash_figure(df, s, label="Eₙ ผลรวมทุกตัว", theme="light", title="t")
+    named = {t.name: t for t in fig.data if t.showlegend is not False}
+    assert list(named) == ["Eₙ ผลรวมทุกตัว", "Eₙ เฉลี่ย 5.00 USD/วัน (ตั้งแต่ t0 P₀)",
+                           "ต้นทุน option (ev ไม่คิด intrinsic)", "Cash Burn สะสม (Aₙ ต่ำสุด, ≤ 0)"]
+    assert np.allclose(named["ต้นทุน option (ev ไม่คิด intrinsic)"].y, 190.0)       # แนวนอนฝั่งบวก
+    burn = named["Cash Burn สะสม (Aₙ ต่ำสุด, ≤ 0)"]
+    assert max(burn.y) <= 0 and list(burn.y) == [0, -60, -150, -150, -150] and burn.line.shape == "hv"
+    projected = next(t for t in fig.data if t.name.endswith("· คาด"))
+    assert projected.line.dash == "dash" and projected.y[-1] == pytest.approx(190.0)
+    texts = [a.text for a in fig.layout.annotations]
+    assert "คืนทุน ev 2026-12-21" in texts and "ตอนนี้" in texts and "t0 · P₀" in texts
+    assert "Cash Burn <b>-150</b>" in texts and "ต้นทุน ev <b>+190</b>" in texts
+    assert fig.layout.xaxis.type == "date"
+
+
+def test_cash_equations_show_the_real_numbers():
+    inputs = inputs_of(aaa_book())
+    text = goal.cash_equation_text([inputs], goal.cash_summary([inputs], T_NOW))
+    assert "ev = 100 · (4.9 − max(0, 10 − 7)) = +190.00" in text
+    assert "t0 2026-11-10 15:00 UTC (fill แรก)" in text
+    assert "Ē = +20.00 / 7.00 วัน = +2.86 USD/วัน" in text
+    assert "cash_burn -150.00" in text
+
+
+def test_the_goal_tab_draws_the_time_chart_from_the_first_row(monkeypatch):
+    from test_positions import ALL_ROWS
+    app = goal_app(monkeypatch, all_rows=ALL_ROWS)
+    app.run(timeout=30)
+    assert not app.exception
+    assert any(m.value == "**AAA · Eₙ เทียบต้นทุน option (ev) และ Cash Burn ตามเวลา**" for m in app.markdown)
+    text = next(c.value for c in app.code if "กราฟเวลา" in c.value)
+    assert "t0 2026-11-10 14:30 UTC (แถวแรก)" in text                 # แถว version 1 ไม่ใช่ fill แรก
+    assert "ev = 100 · (4.9 − max(0, 10 − 7)) = +190.00" in text and "cash_burn -150.00" in text
+    assert not any("t0 = เวลา fill แรก" in c.value for c in app.caption)
+
+
+def test_without_the_first_row_t0_falls_back_to_the_first_fill(monkeypatch):
+    app = goal_app(monkeypatch)
+    app.run(timeout=30)
+    assert not app.exception and not app.error
+    assert any("AAA: อ่านเวลาแถวแรกของ chain ไม่ได้ — t0 = เวลา fill แรก" in c.value for c in app.caption)
+    assert "t0 2026-11-10 15:00 UTC (fill แรก)" in next(c.value for c in app.code if "กราฟเวลา" in c.value)
+
+
+def test_the_portfolio_time_chart_sums_every_symbol(monkeypatch):
+    state, rows = dict(STATE, BBB_fake09=BBB_STATE), dict(ROWS, BBB_fake09=BBB_ROW)
+    app = goal_app(monkeypatch, snap=snapshot(positions=snapshot()["positions"] + [BBB_STOCK]),
+                   state=state, rows=rows)
+    app.run(timeout=30)
+    assert not app.exception and not app.error, [e.value for e in app.error]
+    assert any(m.value.startswith("**รวมพอร์ต · Eₙ เทียบต้นทุน option") for m in app.markdown)
+    assert any("BBB: ไม่มีเวลาเริ่ม chain (t0) และยังไม่มี fill" in c.value for c in app.caption)
+    assert len(app.get("plotly_chart")) == 4
