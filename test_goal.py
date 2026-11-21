@@ -426,13 +426,13 @@ def test_no_t0_and_no_fill_means_no_time_chart():
     assert any("t0 = เวลา fill แรก" in n for n in notes) and any("≠ Eₙ ใน state" in n for n in notes)
 
 
-def test_the_cash_figure_has_the_four_lines():
+def test_the_cash_figure_has_three_lines_without_the_en_line():
     inputs = timed(t0_days=4, fills=[(1, -60.0, 8.0), (2, -150.0, 14.0), (3, -100.0, 20.0)], calls=[CALL_C7])
     s = goal.cash_summary([inputs], T_NOW)
     df = goal.cash_timeline([inputs], T_NOW)
-    fig = goal.cash_figure(df, s, label="Eₙ ผลรวมทุกตัว", theme="light", title="t")
+    fig = goal.cash_figure(df, s, theme="light", title="t")
     named = {t.name: t for t in fig.data if t.showlegend is not False}
-    assert list(named) == ["Eₙ ผลรวมทุกตัว", "Eₙ เฉลี่ย 5.00 USD/วัน (ตั้งแต่ t0 P₀)",
+    assert list(named) == ["Eₙ เฉลี่ย 5.00 USD/วัน (ตั้งแต่ t0 P₀)",              # ไม่มีเส้น Eₙ ขั้นบันไดแล้ว
                            "ต้นทุน option (ev ไม่คิด intrinsic)", "Cash Burn สะสม (Aₙ ต่ำสุด, ≤ 0)"]
     assert np.allclose(named["ต้นทุน option (ev ไม่คิด intrinsic)"].y, 190.0)       # แนวนอนฝั่งบวก
     burn = named["Cash Burn สะสม (Aₙ ต่ำสุด, ≤ 0)"]
@@ -442,6 +442,7 @@ def test_the_cash_figure_has_the_four_lines():
     texts = [a.text for a in fig.layout.annotations]
     assert "คืนทุน ev 2026-12-21" in texts and "ตอนนี้" in texts and "t0 · P₀" in texts
     assert "Cash Burn <b>-150</b>" in texts and "ต้นทุน ev <b>+190</b>" in texts
+    assert not any(t.startswith("Eₙ <b>") for t in texts)                    # ไม่มีป้ายปลายเส้น Eₙ
     assert fig.layout.xaxis.type == "date"
 
 

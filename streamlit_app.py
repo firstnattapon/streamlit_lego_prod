@@ -11,7 +11,7 @@
   🎯 Payoff           — Payoff = ขาหุ้น + ขา LEAPS (+ Eₙ ของ bot) เทียบเป้า FIX_C·ln(x/P₀) จากสถานะจริง ต่อตัว
                         และรวมพอร์ต (สูตร/กราฟ: lego_goal.py · position จริง: lego_webull_read.py GET อย่างเดียว
                         4 path ไม่ส่ง order ไม่สร้าง token + lego_positions.py · chain ของ bot จาก PROD) · ยังไม่คิด premium
-                        + กราฟเวลา Eₙ ผลรวมทุกตัว · Eₙ เฉลี่ยต่อวัน · ต้นทุน option (ev) · Cash Burn
+                        + กราฟเวลา Eₙ เฉลี่ยต่อวัน · ต้นทุน option (ev) · Cash Burn
   🎓 Rebalancing 101  — playground เชิงสอน "gated demo (DNA gate + บัญชีแบบแช่แข็ง)"
                         ไม่ต้องมี Firebase: สุ่มราคา -> เดิน ledger gated_theoretical_v2
                         เห็นว่ารอบ "จำนวนสั่ง = 0" (pass/แช่แข็ง) ถูกบันทึกอย่างไร
@@ -733,7 +733,7 @@ GOAL_CHART_HINT = ("ตอนเริ่มเปิดเฉพาะเป้
                    "แกน y พอดีกับช่วงตั้งแต่ 25% ของ P₀ (ซ้ายกว่านั้น ln ลงลึก) · ปุ่ม Autoscale = ดูทั้งเส้น · "
                    "ดับเบิลคลิกกราฟ = กลับมุมมองเริ่มต้น")
 GOAL_CASH_NOTE = ("Eₙ และ Aₙ = ค่าที่ bot บันทึกต่อ fill (execution_cashflow.finalized_runs = Order audit ที่ FILLED) · "
-                  "ปลายเส้น Eₙ = การ์ด Eₙ สะสม (bot) (แท็บ Live ปรับ genesis baseline จึงอาจต่างเล็กน้อย) · "
+                  "เส้นเฉลี่ยผ่าน Eₙ ตอนนี้ = การ์ด Eₙ สะสม (bot) (แท็บ Live ปรับ genesis baseline จึงอาจต่างเล็กน้อย) · "
                   "t0 = เวลาแถวแรกของ chain (ราคา P₀) · ค่าเฉลี่ยใช้วันปฏิทิน (รวมวันตลาดปิด) · "
                   "ต้นทุน ev ใช้ cost_price ของ LEAPS ใน Webull ลบ intrinsic ที่ P₀ · Cash Burn ติดลบเท่านั้น "
                   "และค้างค่าที่ลึกที่สุด (รวมพอร์ต = รวม Aₙ ทุกตัวก่อน)")
@@ -914,7 +914,7 @@ def _render_goal(snap: dict, chains: dict, chain_issues: dict, now) -> None:
 
 
 def _goal_cash_chart(picked: list, combined: bool, now, theme) -> dict | None:
-    """กราฟเวลา: Eₙ ผลรวมทุกตัว · Eₙ เฉลี่ยต่อวัน (ต่อไปถึงวันคืนทุน) · ต้นทุน option (ev) · Cash Burn สะสม"""
+    """กราฟเวลา: Eₙ เฉลี่ยต่อวัน (ต่อไปถึงวันคืนทุน) · ต้นทุน option (ev) · Cash Burn สะสม"""
     summary = goal.cash_summary(picked, now)
     df = goal.cash_timeline(picked, now)
     name = "รวมพอร์ต" if combined else picked[0].symbol
@@ -928,8 +928,7 @@ def _goal_cash_chart(picked: list, combined: bool, now, theme) -> dict | None:
                 + ("—" if per_day is None else f"{per_day:+,.2f} USD/วัน ใน {summary['days']:,.1f} วันตั้งแต่ t0")
                 + f" · ต้นทุน ev {_signed(summary['ev_cost'])} · คืนทุน ev: {goal.breakeven_text(summary)}"
                 + f" · Cash Burn {_signed(summary['cash_burn'])}")
-    fig = goal.cash_figure(df, summary, label="Eₙ ผลรวมทุกตัว" if combined else f"Eₙ {name}", theme=theme,
-                           title=f"{name} · Eₙ เทียบต้นทุน option (ev)", subtitle=subtitle)
+    fig = goal.cash_figure(df, summary, theme=theme, title=f"{name} · Eₙ เทียบต้นทุน option (ev)", subtitle=subtitle)
     config = dict(goal.CASH_CONFIG, toImageButtonOptions=dict(goal.CASH_CONFIG["toImageButtonOptions"],
                                                               filename=f"goal_cash_{'portfolio' if combined else name}"))
     st.plotly_chart(fig, theme=None, config=config, key="goal_cash_chart")
