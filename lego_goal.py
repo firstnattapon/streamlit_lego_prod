@@ -29,7 +29,7 @@ leaps_shares = 100 × สัญญา · ขา LEAPS เริ่มที่ 0
 กราฟเวลา (Eₙ เทียบต้นทุน option และ Cash Burn) · แกน x = เวลา UTC · ตัวเดียวหรือรวมพอร์ต (ผลรวมทุกตัว) · 3 เส้น:
 
     trend       Eₙ เฉลี่ยต่อวัน     = Σ Ēᵢ · max(0, t − t0ᵢ)   Ēᵢ = Eᵢ(now) / วันตั้งแต่ t0ᵢ (วันปฏิทิน) · ต่อไปอนาคต (ประ)
-                                   สีเขียวเข้ม · สวิตช์ to_expiry (ค่าเริ่มต้นปิด) = ต่อเส้นประจน LEAPS หมดอายุเร็วสุด
+                                   สีเขียวเข้ม · สวิตช์ to_expiry (หน้าเว็บเปิดเป็นค่าเริ่มต้น) = ต่อเส้นประจน LEAPS หมดอายุเร็วสุด
                                    Eᵢ = Eₙ ของ fill ล่าสุด (finalized_runs ของ bot) · ไม่วาดเส้น Eₙ เอง
     ev_cost     ต้นทุน option (ev) = Σ leaps_shares · (cost − max(0, p0 − K))   ไม่คิด intrinsic ที่ P₀ · เส้นแนวนอนฝั่งบวก
     cash_burn   Cash Burn สะสม    = min(0, min_{s ≤ t} Σ Aᵢ(s))   ติดลบหรือ 0 เท่านั้น ค้างค่าที่ลึกสุด
@@ -641,7 +641,7 @@ def chain_pace(inputs: GoalInputs, now) -> ChainPace:
 def cash_summary(items: Sequence[GoalInputs], now, *, to_expiry: bool = False) -> dict:
     """ค่าของกราฟเวลา: Eₙ ตอนนี้ · Eₙ เฉลี่ยต่อวัน (Σ ของแต่ละตัว) · ต้นทุน ev · Cash Burn ลึกสุด · วันคืนทุน ev
     · status: covered (Eₙ ≥ ต้นทุนแล้ว) · projected · after_expiry / after_horizon (ไม่ทัน) · never · None (ไม่มีต้นทุน)
-    · to_expiry (สวิตช์ · ค่าเริ่มต้นปิด = เหมือนเดิม): ต่อเส้นเฉลี่ยจน LEAPS หมดอายุเร็วสุด (end = expiry)
+    · to_expiry (สวิตช์ในหน้าเว็บ เปิดเป็นค่าเริ่มต้น · False = ต่อถึงวันคืนทุน): ต่อเส้นเฉลี่ยจน LEAPS หมดอายุเร็วสุด (end = expiry)
       ไม่เปลี่ยน status / วันคืนทุน · ไม่มีวันหมดอายุ หรือหมดอายุแล้ว หรือไม่มีค่าเฉลี่ย → ต่อเส้นแบบเดิม"""
     now = _utc(now)
     paces = [chain_pace(i, now) for i in items]

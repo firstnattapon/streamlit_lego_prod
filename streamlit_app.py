@@ -12,7 +12,7 @@
                         และรวมพอร์ต (สูตร/กราฟ: lego_goal.py · position จริง: lego_webull_read.py GET อย่างเดียว
                         4 path ไม่ส่ง order ไม่สร้าง token + lego_positions.py · chain ของ bot จาก PROD) · ยังไม่คิด premium
                         + กราฟเวลา Eₙ เฉลี่ยต่อวัน · ต้นทุน option (ev) · Cash Burn
-                          (สวิตช์ต่อเส้นเฉลี่ยจน LEAPS หมดอายุ · ค่าเริ่มต้นปิด)
+                          (สวิตช์ต่อเส้นเฉลี่ยจน LEAPS หมดอายุ · ค่าเริ่มต้นเปิด)
   🎓 Rebalancing 101  — playground เชิงสอน "gated demo (DNA gate + บัญชีแบบแช่แข็ง)"
                         ไม่ต้องมี Firebase: สุ่มราคา -> เดิน ledger gated_theoretical_v2
                         เห็นว่ารอบ "จำนวนสั่ง = 0" (pass/แช่แข็ง) ถูกบันทึกอย่างไร
@@ -926,11 +926,12 @@ def _goal_cash_chart(picked: list, combined: bool, now, theme) -> dict | None:
         return None
     expiry = goal.first_expiry(picked)
     to_expiry = st.toggle(
-        "ต่อเส้นเฉลี่ยจน LEAPS หมดอายุ", key="goal_cash_to_expiry", disabled=expiry is None,
+        "ต่อเส้นเฉลี่ยจน LEAPS หมดอายุ", value=True, key="goal_cash_to_expiry", disabled=expiry is None,
         help=("ไม่มีวันหมดอายุของ LEAPS" if expiry is None else
-              "ปิด (ค่าเริ่มต้น) = เส้นประต่อถึงวันคืนทุน ev เหมือนเดิม · เปิด = ต่อเส้นประจน LEAPS หมดอายุ "
-              f"(เร็วสุด {expiry:%Y-%m-%d %H:%M} UTC) · ไม่เปลี่ยนวันคืนทุน"))
-    summary = goal.cash_summary(picked, now, to_expiry=to_expiry)
+              "เปิด (ค่าเริ่มต้น) = ต่อเส้นประจน LEAPS หมดอายุ "
+              f"(เร็วสุด {expiry:%Y-%m-%d %H:%M} UTC) · ปิด = เส้นประต่อถึงวันคืนทุน ev · ไม่เปลี่ยนวันคืนทุน"))
+    # ไม่มีวันหมดอายุ = สวิตช์กดไม่ได้ → ไม่ส่ง to_expiry (ไม่ต้องมีข้อความ "ไม่มีวันหมดอายุ" ซ้ำใต้กราฟ)
+    summary = goal.cash_summary(picked, now, to_expiry=to_expiry and expiry is not None)
     per_day = summary["per_day"]
     subtitle = (f"Eₙ {_signed(summary['excess'])} · เฉลี่ย "
                 + ("—" if per_day is None else f"{per_day:+,.2f} USD/วัน ใน {summary['days']:,.1f} วันตั้งแต่ t0")

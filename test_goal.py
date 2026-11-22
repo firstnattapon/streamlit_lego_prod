@@ -460,7 +460,7 @@ def test_the_projection_reaches_the_leaps_expiry_only_when_switched_on():
     inputs = timed(t0_days=4, fills=[(1, -60.0, 8.0), (3, -100.0, 20.0)], calls=[CALL_C7])
     expiry = pd.Timestamp("2027-05-21 20:00", tz="UTC")                          # 16:00 New York
     assert goal.first_expiry([inputs]) == expiry and goal.first_expiry([timed()]) is None
-    off = goal.cash_summary([inputs], T_NOW)                                     # ค่าเริ่มต้น = เหมือนเดิม
+    off = goal.cash_summary([inputs], T_NOW)                                     # ปิด = ต่อถึงวันคืนทุนแบบเดิม
     on = goal.cash_summary([inputs], T_NOW, to_expiry=True)
     assert off["to_expiry"] is False and off["end"] == off["breakeven"]
     assert on["to_expiry"] is True and on["end"] == expiry
@@ -516,17 +516,31 @@ def test_the_goal_tab_draws_the_time_chart_from_the_first_row(monkeypatch):
     assert not any("t0 = เวลา fill แรก" in c.value for c in app.caption)
 
 
-def test_the_goal_tab_expiry_switch_starts_off_and_extends_the_line(monkeypatch):
+def test_the_goal_tab_expiry_switch_starts_on_and_can_be_turned_off(monkeypatch):
     from test_positions import ALL_ROWS
     app = goal_app(monkeypatch, all_rows=ALL_ROWS)
     app.run(timeout=30)
-    switch = app.toggle(key="goal_cash_to_expiry")
-    assert switch.value is False and not switch.disabled                    # ค่าเริ่มต้นปิด = เหมือนเดิม
-    assert not any("ต่อเส้นเฉลี่ยจน LEAPS หมดอายุ" in c.value for c in app.code)
-    switch.set_value(True).run(timeout=30)
     assert not app.exception and not app.error
-    assert app.toggle(key="goal_cash_to_expiry").value is True
+    switch = app.toggle(key="goal_cash_to_expiry")
+    assert switch.value is True and not switch.disabled                     # ค่าเริ่มต้นเปิด
     assert any("ต่อเส้นเฉลี่ยจน LEAPS หมดอายุ 2027-05-21 20:00 UTC" in c.value for c in app.code)
+    switch.set_value(False).run(timeout=30)
+    assert not app.exception and not app.error
+    assert app.toggle(key="goal_cash_to_expiry").value is False
+    assert not any("ต่อเส้นเฉลี่ยจน LEAPS หมดอายุ" in c.value for c in app.code)   # ปิด = ต่อถึงวันคืนทุน
+
+
+def test_without_a_leaps_expiry_the_switch_is_disabled_and_adds_no_note(monkeypatch):
+    from test_positions import ALL_ROWS
+    monkeypatch.setattr(goal, "first_expiry", lambda items: None)      # เหมือนไม่มี LEAPS ที่มีวันหมดอายุ
+    app = goal_app(monkeypatch, all_rows=ALL_ROWS)
+    app.run(timeout=30)
+    assert not app.exception and not app.error
+    switch = app.toggle(key="goal_cash_to_expiry")
+    assert switch.disabled and switch.value is True                     # กดไม่ได้ · ไม่ส่ง to_expiry ให้สูตร
+    assert not any("ไม่มีวันหมดอายุ LEAPS" in c.value for c in app.caption)
+    assert not any("ต่อเส้นเฉลี่ยจน LEAPS หมดอายุ" in c.value for c in app.code)
+    assert any("กราฟเวลา" in c.value for c in app.code)
 
 
 def test_without_the_first_row_t0_falls_back_to_the_first_fill(monkeypatch):
