@@ -12,6 +12,7 @@
                         และรวมพอร์ต (สูตร/กราฟ: lego_goal.py · position จริง: lego_webull_read.py GET อย่างเดียว
                         4 path ไม่ส่ง order ไม่สร้าง token + lego_positions.py · chain ของ bot จาก PROD) · ยังไม่คิด premium
                         + กราฟเวลา Eₙ เฉลี่ยต่อวัน · ต้นทุน option (ev) · Cash Burn
+                          (สวิตช์ต่อเส้นเฉลี่ยจน LEAPS หมดอายุ · ค่าเริ่มต้นปิด)
   🎓 Rebalancing 101  — playground เชิงสอน "gated demo (DNA gate + บัญชีแบบแช่แข็ง)"
                         ไม่ต้องมี Firebase: สุ่มราคา -> เดิน ledger gated_theoretical_v2
                         เห็นว่ารอบ "จำนวนสั่ง = 0" (pass/แช่แข็ง) ถูกบันทึกอย่างไร
@@ -104,7 +105,7 @@ if getattr(_lego_webull_read, "SNAPSHOT_SCHEMA", 0) < 2:
     _lego_webull_read = importlib.reload(_lego_webull_read)
 if getattr(positions, "POSITIONS_SCHEMA", 0) < 2:   # 2 = LegoChain มี fills + t0 (กราฟเวลา)
     positions = importlib.reload(positions)
-if getattr(goal, "GOAL_SCHEMA", 0) < 5:          # 5 = กราฟเวลา Eₙ / ต้นทุน option (ev) / Cash Burn
+if getattr(goal, "GOAL_SCHEMA", 0) < 6:          # 6 = กราฟเวลา + สวิตช์ต่อเส้นเฉลี่ยจน LEAPS หมดอายุ
     goal = importlib.reload(goal)
 
 from lego_webull_read import WebullReadError, fetch_account_snapshot, redact
@@ -914,20 +915,30 @@ def _render_goal(snap: dict, chains: dict, chain_issues: dict, now) -> None:
 
 
 def _goal_cash_chart(picked: list, combined: bool, now, theme) -> dict | None:
-    """กราฟเวลา: Eₙ เฉลี่ยต่อวัน (ต่อไปถึงวันคืนทุน) · ต้นทุน option (ev) · Cash Burn สะสม"""
-    summary = goal.cash_summary(picked, now)
+    """กราฟเวลา: Eₙ เฉลี่ยต่อวัน (ต่อไปถึงวันคืนทุน หรือจน LEAPS หมดอายุเมื่อเปิดสวิตช์) · ต้นทุน option (ev)
+    · Cash Burn สะสม"""
     df = goal.cash_timeline(picked, now)
     name = "รวมพอร์ต" if combined else picked[0].symbol
     st.markdown(f"**{name} · Eₙ เทียบต้นทุน option (ev) และ Cash Burn ตามเวลา**")
     if df.empty:
         st.caption("ยังไม่มีเวลาเริ่ม chain หรือ fill ของ bot จึงยังไม่มีกราฟเวลา")
-        _goal_notes(summary["notes"])
+        _goal_notes(goal.cash_summary(picked, now)["notes"])
         return None
+    expiry = goal.first_expiry(picked)
+    to_expiry = st.toggle(
+        "ต่อเส้นเฉลี่ยจน LEAPS หมดอายุ", key="goal_cash_to_expiry", disabled=expiry is None,
+        help=("ไม่มีวันหมดอายุของ LEAPS" if expiry is None else
+              "ปิด (ค่าเริ่มต้น) = เส้นประต่อถึงวันคืนทุน ev เหมือนเดิม · เปิด = ต่อเส้นประจน LEAPS หมดอายุ "
+              f"(เร็วสุด {expiry:%Y-%m-%d %H:%M} UTC) · ไม่เปลี่ยนวันคืนทุน"))
+    summary = goal.cash_summary(picked, now, to_expiry=to_expiry)
     per_day = summary["per_day"]
     subtitle = (f"Eₙ {_signed(summary['excess'])} · เฉลี่ย "
                 + ("—" if per_day is None else f"{per_day:+,.2f} USD/วัน ใน {summary['days']:,.1f} วันตั้งแต่ t0")
                 + f" · ต้นทุน ev {_signed(summary['ev_cost'])} · คืนทุน ev: {goal.breakeven_text(summary)}"
                 + f" · Cash Burn {_signed(summary['cash_burn'])}")
+    if summary["to_expiry"]:
+        subtitle += (f" · เฉลี่ย ณ LEAPS หมดอายุ {summary['expiry']:%Y-%m-%d}: "
+                     f"{_signed(goal.trend_value(summary, summary['expiry']))}")
     fig = goal.cash_figure(df, summary, theme=theme, title=f"{name} · Eₙ เทียบต้นทุน option (ev)", subtitle=subtitle)
     config = dict(goal.CASH_CONFIG, toImageButtonOptions=dict(goal.CASH_CONFIG["toImageButtonOptions"],
                                                               filename=f"goal_cash_{'portfolio' if combined else name}"))

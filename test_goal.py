@@ -446,6 +446,55 @@ def test_the_cash_figure_has_three_lines_without_the_en_line():
     assert fig.layout.xaxis.type == "date"
 
 
+def test_the_daily_average_line_is_dark_green_in_both_themes():
+    inputs = timed(t0_days=4, fills=[(1, -60.0, 8.0), (3, -100.0, 20.0)], calls=[CALL_C7])
+    s, df = goal.cash_summary([inputs], T_NOW), goal.cash_timeline([inputs], T_NOW)
+    for theme, color in (("light", "#006400"), ("dark", "#1b7a34"), (None, "#006400")):
+        fig = goal.cash_figure(df, s, theme=theme)
+        trend = [t for t in fig.data if t.legendgroup == "trend" and t.mode == "lines"]
+        assert len(trend) == 2 and {t.line.color for t in trend} == {color}        # ทึบ + ประ (คาด) สีเดียวกัน
+        assert fig.data[-1].marker.line.color == color                               # วงคืนทุน ev
+
+
+def test_the_projection_reaches_the_leaps_expiry_only_when_switched_on():
+    inputs = timed(t0_days=4, fills=[(1, -60.0, 8.0), (3, -100.0, 20.0)], calls=[CALL_C7])
+    expiry = pd.Timestamp("2027-05-21 20:00", tz="UTC")                          # 16:00 New York
+    assert goal.first_expiry([inputs]) == expiry and goal.first_expiry([timed()]) is None
+    off = goal.cash_summary([inputs], T_NOW)                                     # ค่าเริ่มต้น = เหมือนเดิม
+    on = goal.cash_summary([inputs], T_NOW, to_expiry=True)
+    assert off["to_expiry"] is False and off["end"] == off["breakeven"]
+    assert on["to_expiry"] is True and on["end"] == expiry
+    assert (on["status"], on["breakeven"]) == (off["status"], off["breakeven"])     # วันคืนทุนไม่เปลี่ยน
+    df = goal.cash_timeline([inputs], T_NOW)
+    fig = goal.cash_figure(df, on, theme="light")
+    projected = next(t for t in fig.data if t.name.endswith("· คาด"))
+    assert pd.Timestamp(projected.x[-1]) == expiry
+    assert projected.y[-1] == pytest.approx(goal.trend_value(on, expiry)) == pytest.approx(5.0 * (4 + (expiry - T_NOW) / DAY))
+    texts = [a.text for a in fig.layout.annotations]
+    assert "LEAPS หมดอายุ 2027-05-21" in texts and "คืนทุน ev 2026-12-21" in texts
+    shift = {a.text: a.yshift or 0 for a in fig.layout.annotations}
+    assert shift["t0 · P₀"] == 0 and shift["ตอนนี้"] < 0                        # ชิดกันเมื่อแกนยาว → ป้ายแถวที่ 2
+    assert shift["คืนทุน ev 2026-12-21"] == 0 == shift["LEAPS หมดอายุ 2027-05-21"]
+    assert "LEAPS หมดอายุ 2027-05-21" not in [a.text for a in goal.cash_figure(df, off, theme="light").layout.annotations]
+    assert "ต่อเส้นเฉลี่ยจน LEAPS หมดอายุ 2027-05-21 20:00 UTC: เส้นเฉลี่ย = +" in goal.cash_equation_text([inputs], on)
+    assert "ต่อเส้นเฉลี่ยจน LEAPS หมดอายุ" not in goal.cash_equation_text([inputs], off)
+
+
+def test_the_expiry_switch_extends_every_state_and_falls_back_without_an_expiry():
+    losing = timed(fills=[(1, 0.0, -3.0)], calls=[CALL_C7])                     # Ē < 0 → ต่อเส้นลงจนหมดอายุ
+    s = goal.cash_summary([losing], T_NOW, to_expiry=True)
+    assert s["status"] == "never" and s["end"] == goal.first_expiry([losing]) and s["to_expiry"]
+    covered = goal.cash_summary([timed(fills=[(1, 0.0, 250.0)], calls=[CALL_C7])], T_NOW, to_expiry=True)
+    assert covered["status"] == "covered" and covered["end"] == goal.first_expiry([losing])
+    no_date = timed(fills=[(1, 0.0, 8.0)], calls=[goal.LeapsCall(7.0, 100.0, 0.8, None, 4.9)])
+    plain, switched = goal.cash_summary([no_date], T_NOW), goal.cash_summary([no_date], T_NOW, to_expiry=True)
+    assert switched["end"] == plain["end"] and not switched["to_expiry"]
+    assert "ไม่มีวันหมดอายุ LEAPS — ต่อเส้นเฉลี่ยแบบเดิม" in switched["notes"]
+    expired = timed(fills=[(1, 0.0, 8.0)], calls=[goal.LeapsCall(7.0, 100.0, 0.8, date(2026, 11, 1), 4.9)])
+    gone = goal.cash_summary([expired], T_NOW, to_expiry=True)
+    assert not gone["to_expiry"] and any("LEAPS หมดอายุแล้ว (2026-11-01)" in n for n in gone["notes"])
+
+
 def test_cash_equations_show_the_real_numbers():
     inputs = inputs_of(aaa_book())
     text = goal.cash_equation_text([inputs], goal.cash_summary([inputs], T_NOW))
@@ -465,6 +514,19 @@ def test_the_goal_tab_draws_the_time_chart_from_the_first_row(monkeypatch):
     assert "t0 2026-11-10 14:30 UTC (แถวแรก)" in text                 # แถว version 1 ไม่ใช่ fill แรก
     assert "ev = 100 · (4.9 − max(0, 10 − 7)) = +190.00" in text and "cash_burn -150.00" in text
     assert not any("t0 = เวลา fill แรก" in c.value for c in app.caption)
+
+
+def test_the_goal_tab_expiry_switch_starts_off_and_extends_the_line(monkeypatch):
+    from test_positions import ALL_ROWS
+    app = goal_app(monkeypatch, all_rows=ALL_ROWS)
+    app.run(timeout=30)
+    switch = app.toggle(key="goal_cash_to_expiry")
+    assert switch.value is False and not switch.disabled                    # ค่าเริ่มต้นปิด = เหมือนเดิม
+    assert not any("ต่อเส้นเฉลี่ยจน LEAPS หมดอายุ" in c.value for c in app.code)
+    switch.set_value(True).run(timeout=30)
+    assert not app.exception and not app.error
+    assert app.toggle(key="goal_cash_to_expiry").value is True
+    assert any("ต่อเส้นเฉลี่ยจน LEAPS หมดอายุ 2027-05-21 20:00 UTC" in c.value for c in app.code)
 
 
 def test_without_the_first_row_t0_falls_back_to_the_first_fill(monkeypatch):
