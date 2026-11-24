@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<!--
+  5-STEP PLANNER — SLV + 1 asset เพื่อลด Cash Burn โดย E ไม่ลด
+  Self-contained, offline-ready. No external requests. Equations rendered as styled HTML.
+  ข้อมูลเดียวกับ docs/slv_pair_cash_burn_5_step_plan.json
+-->
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SLV คู่ลด Cash Burn</title>
+<style>
+  :root{
+    --bg:#faf7f2; --ink:#2b2b2b; --muted:#6f6a63;
+    --gold:#b8894b; --deep:#7a4b2b; --line:#e6ddd0;
+    --card:#ffffff; --accent:#3d6b5e; --warn:#c0603a;
+    --good:#2f7a4f; --bad:#b0412e; --soft:#f3ede2;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:"Sarabun","Segoe UI",system-ui,sans-serif;line-height:1.7}
+  .wrap{max-width:960px;margin:0 auto;padding:32px 16px 80px}
+  header{text-align:center;padding:28px 0 8px;border-bottom:2px solid var(--gold)}
+  header h1{margin:0;font-size:1.7rem;color:var(--deep);letter-spacing:.3px}
+  header p{margin:6px 0 0;color:var(--muted)}
+  .goalbar{background:var(--card);border:1px solid var(--line);border-left:5px solid var(--gold);
+    border-radius:10px;padding:16px 20px;margin:24px 0}
+  .goalbar b{color:var(--deep)}
+  .answer{background:#eef5f1;border:1px solid #c9dfd3;border-left:5px solid var(--good);
+    border-radius:10px;padding:16px 20px;margin:18px 0}
+  .answer h2{margin:0 0 6px;font-size:1.2rem;color:var(--good)}
+  .trap{background:#fbefec;border:1px solid #efcfc6;border-left:5px solid var(--bad);
+    border-radius:10px;padding:14px 20px;margin:14px 0}
+  .trap h3{margin:0 0 4px;color:var(--bad);font-size:1rem}
+  .metric{display:inline-block;background:var(--soft);border-radius:8px;padding:4px 10px;margin:4px 6px 0 0;font-size:.9rem}
+  .step{margin:30px 0}
+  .step h2{display:flex;align-items:center;gap:12px;font-size:1.25rem;color:var(--deep);margin:0 0 4px}
+  .num{display:inline-flex;width:34px;height:34px;border-radius:50%;background:var(--gold);color:#fff;
+    align-items:center;justify-content:center;font-weight:700;flex:0 0 auto}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 18px;margin:10px 0}
+  .card h3{margin:0 0 6px;font-size:1rem;color:var(--accent)}
+  .card p{margin:4px 0}
+  .tag{font-size:.78rem;background:#eef2ef;color:var(--accent);border-radius:6px;padding:2px 8px;margin-left:6px;white-space:nowrap}
+  .why{margin:6px 0 0;padding-left:20px;color:var(--muted);font-size:.92rem}
+  .ev{font-size:.85rem;color:var(--muted);margin-top:6px}
+  .eq{font-family:"Cascadia Code",Consolas,monospace;background:#2b2b2b;color:#f5e9d6;
+    border-radius:8px;padding:10px 14px;margin:8px 0;overflow-x:auto;font-size:.93rem}
+  .eq .lbl{color:var(--gold);display:block;font-size:.8rem;margin-bottom:2px;font-family:"Sarabun","Segoe UI",system-ui,sans-serif}
+  .eq .note{color:#bdb3a3;display:block;font-size:.8rem;margin-top:2px;font-family:"Sarabun","Segoe UI",system-ui,sans-serif}
+  .tbl{overflow-x:auto;margin:8px 0}
+  table{width:100%;border-collapse:collapse}
+  th,td{border:1px solid var(--line);padding:7px 9px;text-align:left;font-size:.9rem;vertical-align:top}
+  th{background:var(--soft);color:var(--deep)}
+  td.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+  td.seq{font-variant-numeric:tabular-nums;font-size:.85rem}
+  td.d{white-space:nowrap}
+  tr.pick td{background:#eef5f1}
+  tr.trap td{background:#fbefec}
+  .g{color:var(--good);font-weight:600}
+  .b{color:var(--bad);font-weight:600}
+  .loop{background:#fbf3ea;border:1px dashed var(--warn);border-radius:10px;padding:16px 20px;margin:14px 0}
+  .ladder td:first-child{font-weight:600}
+  ul.assume{padding-left:20px;color:var(--muted);font-size:.9rem}
+  footer{text-align:center;color:var(--muted);font-size:.85rem;margin-top:40px}
+  @media (max-width:600px){ header h1{font-size:1.35rem} th,td{font-size:.82rem;padding:6px} }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>SLV + 1 สินทรัพย์ · ลด Cash Burn โดย E ไม่ลด</h1>
+    <p>แผน 5 ขั้น · Goals → Problems → Diagnosis → Design → Do it · ข้อมูลถึง 2026-11-23</p>
+  </header>
+
+  <div class="answer">
+    <h2>คำตอบ: PLTR — แบ่งงบเดิมเป็น SLV 975 + PLTR 525 (w = 0.65)</h2>
+    <p>ผ่านครบ 5 ด่านทดสอบตามกฎ bot (FIX_C, DIFF 50, ΔA = F·(P/P_acted − 1)):
+      <b>Cash Burn ×0.48–0.97</b> (ตื้นลง 3–52%) และ <b>E ×1.22–2.66</b> เทียบ SLV เดี่ยว FIX_C 1,500</p>
+    <p>ช่วงจริงล่าสุดบนแท่ง 15 นาที (SLV 60.09 → 38.91, −35%): Cash Burn <b>−670.7 → −517.0 USD</b> (−23%) ·
+      Eₙ <b>21.9 → 27.0 USD</b> · เงินสด A −613.9 → −451.3 USD</p>
+    <p class="ev">ตัวสำรองที่ผ่านด่าน daily ครบ 4/4: TSLA (w 0.80, ผ่านด่าน 15 นาทีด้วย), HOOD (w 0.80), URA (w 0.65), CCJ (w 0.80) ·
+      ตัวเลขเป็นผลจากข้อมูลย้อนหลัง ไม่ใช่คำแนะนำการลงทุน</p>
+  </div>
+
+  <div class="trap">
+    <h3>⚠️ กับดัก: ZSL (−2x silver) ชนะทั้งสองเกณฑ์บนกระดาษ</h3>
+    <p>SLV 70% + ZSL 30%: Cash Burn ×0.13–0.32 และ E ×1.94 ทุกด่าน — แต่ <b>A = F·(3w − 2)·Σr<sub>SLV</sub> ≈ 0</b>
+      เมื่อ w ≈ 2/3 คือทิศทางของเงินถูกลบทิ้ง E ที่เพิ่มถูกหักใน R เท่ากัน (ช่วงเงินขึ้นเสียเงินสด 145–350 USD เทียบ SLV เดี่ยว)
+      ถ้าเอา E นี้ไปจ่ายต้นทุน LEAPS หรือ Option Scale ขยาย FIX_C จะขยายด้วยเงินที่ไม่มีจริง</p>
+  </div>
+
+  <!-- STEP 1 -->
+  <div class="goalbar">
+    <b>🎯 เป้าหมาย (Step 1):</b> ใช้ SLV เป็นขาหลัก แล้วเลือกสินทรัพย์ตัวที่ 2 หนึ่งตัวมาแบ่งงบ FIX_C เดิม 1,500 USD (ไม่เติมเงิน)
+    ให้ Cash Burn รวมพอร์ต = min(0, min ΣAᵢ) ตื้นกว่ารัน SLV เดี่ยวอย่างน้อย 10% ขณะที่ ΣEₙ ≥ Eₙ ของ SLV เดี่ยว
+    โดยไม่ใช้สินทรัพย์ inverse / leveraged ที่ทำให้ E เพิ่มแต่ R ลดเท่ากัน<br>
+    <span class="metric">ตัวชี้วัด: CB ratio = Cash Burn คู่ ÷ Cash Burn SLV เดี่ยว</span>
+    <span class="metric">ปัจจุบัน: 1.00 เท่า</span>
+    <span class="metric">เป้า: ≤ 0.90 เท่า</span>
+    <span class="metric">เงื่อนไขร่วม: E ratio ≥ 1.00</span>
+    <span class="metric">ระยะเวลา: 6 เดือน (2026-11-25 → 2027-05-24)</span>
+    <ol class="why" style="color:var(--ink)">
+      <li>CB ratio ≤ 0.90 ทั้งค่ากลางและหาง p5 ใน backtest และใน live เทียบ shadow SLV เดี่ยว</li>
+      <li>E ratio = (Eₙ ขา SLV + Eₙ ขาตัวที่ 2) ÷ Eₙ ของ SLV เดี่ยว ≥ 1.00</li>
+      <li>A guard: ไม่ใช่ inverse / leveraged / ETF เสื่อมค่า และในตลาดไร้ทิศ A ไม่ต่ำกว่า SLV เดี่ยว</li>
+      <li>ใช้ bot เดิม: 2 chain แยก ไม่แก้สมการ ledger · Cash Burn ดูได้ที่แท็บ 🎯 Payoff → รวมพอร์ต</li>
+    </ol>
+  </div>
+
+  <!-- STEP 2 -->
+  <div class="step">
+    <h2><span class="num">2</span> Problems — ช่องว่างที่ขวางอยู่</h2>
+    <div class="card">
+      <h3>P1 — SLV เดี่ยวมี Cash Burn ลึก <span class="tag">severity 5/5 · gap 1.00 → 0.90</span></h3>
+      <p>18 ก.ย. → 23 พ.ย. 2026 SLV ลง 60.09 → 38.91 (−35%) บนแท่ง 15 นาทีตามกฎ bot ได้ Cash Burn −670.7 USD (44.7% ของ FIX_C) ·
+        bootstrap ตลาดไร้ทิศ 1 ปี หาง p5 ≈ −1,000 USD</p>
+    </div>
+    <div class="card">
+      <h3>P2 — E กับ Cash Burn มาจากความผันผวนชุดเดียวกัน <span class="tag">severity 4/5</span></h3>
+      <p>ตัว vol ต่ำ (GLD, TLT, SPY, UUP, DBA) ลด CB ได้แต่ E ตกต่ำกว่า SLV เดี่ยว 3–5% จึงตกเกณฑ์ E</p>
+    </div>
+    <div class="card">
+      <h3>P3 — ตัวที่ลด CB ได้มากสุดเป็นกับดัก (ZSL) <span class="tag">severity 4/5</span></h3>
+      <p>ผ่านเกณฑ์บนกระดาษ แต่ลบทิศทางของเงินทิ้ง ซึ่งขัดกับเหตุผลที่เลือก SLV เป็นขาหลัก</p>
+    </div>
+    <div class="card">
+      <h3>P4 — regime เปลี่ยน <span class="tag">severity 3/5 · w* 0.47–0.79</span></h3>
+      <p>vol ของ SLV 39% ทั้งช่วง → 64% ใน 1 ปีล่าสุด · ρ ของ CCJ / URA กับ SLV ขึ้นเป็น 0.51–0.56 ·
+        ที่ vol ปีล่าสุด ทฤษฎีให้ E ratio ของ SLV+PLTR 65/35 แค่ 0.97 (ด่าน 15 นาทีจริงได้ 1.22)</p>
+    </div>
+    <div class="card">
+      <h3>P5 — Hindsight bias <span class="tag">severity 3/5</span></h3>
+      <p>PLTR, HOOD, NVDA ขึ้นแรงในปี 2023–2026 จึงดูดีใน backtest เส้นทางจริงเพราะเทรนด์ ไม่ใช่เพราะช่วยลด CB</p>
+    </div>
+  </div>
+
+  <!-- STEP 3 -->
+  <div class="step">
+    <h2><span class="num">3</span> Diagnosis — รากของปัญหา</h2>
+    <div class="card">
+      <h3>RC1 (P1) — ขาเดียวไม่มีอะไรหักล้าง <span class="tag">น้ำหนัก w = 0.7</span></h3>
+      <ol class="why">
+        <li>ทำไม Cash Burn ลึก? → Aₙ สะสมติดลบเมื่อราคาลง</li>
+        <li>ทำไม Aₙ ติดลบ? → ΔAₙ = FIX_C·(P/P_acted − 1) ทุกครั้งที่ bot ซื้อเติมตอนราคาลง</li>
+        <li>ทำไมไม่มีอะไรชดเชย? → มีขาเดียว ทุกการเคลื่อนไหวของ SLV ไหลเข้า A ตรง ๆ</li>
+        <li>จึงแก้ที่: เพิ่มขาที่เคลื่อนไหวไม่พร้อม SLV (ρ ต่ำ) ด้วยงบเดิม</li>
+      </ol>
+    </div>
+    <div class="card">
+      <h3>RC2 (P1) — SLV อยู่ใน regime ผันผวนสูง <span class="tag">น้ำหนัก w = 0.3</span></h3>
+      <ol class="why"><li>ขึ้น 21.83 → 105.60 (Q1 2026) แล้วลงเหลือ 38.91 · vol 1 ปีล่าสุด 64%</li><li>CB ∝ σ·√t ของขาหลัก</li></ol>
+    </div>
+    <div class="card">
+      <h3>RC3 (P2) — E ∝ σ² แต่ CB ∝ σ ของพอร์ต <span class="tag">น้ำหนัก w = 1.0</span></h3>
+      <ol class="why">
+        <li>E ratio = w + (1 − w)·k² &lt; 1 เมื่อ k = σ<sub>B</sub>/σ<sub>SLV</sub> &lt; 1 → ตัว vol ต่ำทำ E ตกเสมอ</li>
+        <li>ตัว vol สูงมาก (QBTS, RGTI, SOXL) ทำ σ<sub>p</sub> โตจนกลบผลกระจายความเสี่ยง</li>
+        <li>จึงต้องหา: vol ใกล้หรือสูงกว่า SLV เล็กน้อย + ρ ≤ 0.3</li>
+      </ol>
+    </div>
+    <div class="card">
+      <h3>RC4 (P3) — inverse / leveraged ETF ทำ E ปลอม <span class="tag">น้ำหนัก w = 1.0</span></h3>
+      <ol class="why">
+        <li>ZSL ผันผวน 2 เท่าของเงิน → E ∝ σ² เพิ่ม</li>
+        <li>ZSL reset ทุกวันแบบซื้อแพงขายถูก → ln ราคาลอยลง → R ลดเท่ากับ E ที่เพิ่ม</li>
+        <li>ที่ SLV:ZSL = 2:1 ได้ A ≈ 0 ไม่ว่าเงินขึ้นหรือลง</li>
+      </ol>
+    </div>
+    <div class="card">
+      <h3>RC5 (P4) — กลุ่มโลหะ / พลังงานเคลื่อนไหวด้วยกันมากขึ้น <span class="tag">น้ำหนัก w = 0.6</span></h3>
+      <ol class="why"><li>ρ CCJ 0.36 → 0.51 · URA 0.45 → 0.56 (ทั้งช่วง → 252 วันล่าสุด)</li></ol>
+    </div>
+    <div class="card">
+      <h3>RC6 (P4) — k เปลี่ยน → w ที่ดีที่สุดเลื่อน <span class="tag">น้ำหนัก w = 0.4</span></h3>
+      <ol class="why"><li>PLTR: w* = 0.79 (ทั้งช่วง) → 0.47 (ปีล่าสุด) เพราะ vol ของ SLV ขึ้นจนเท่า PLTR</li></ol>
+    </div>
+    <div class="card">
+      <h3>RC7 (P5) — เส้นทางราคาจริงมีเส้นเดียว <span class="tag">น้ำหนัก w = 1.0</span></h3>
+      <ol class="why"><li>แก้ด้วย block bootstrap ที่ลบค่าเฉลี่ยผลตอบแทนออก (ตลาดไร้ทิศ) ให้เหลือแต่ σ, ρ และหางอ้วนจริง</li>
+        <li>ผล: NVDA ตกเหลือผ่าน 2/4 · IBIT 1/4</li></ol>
+    </div>
+  </div>
+
+  <!-- STEP 4 -->
+  <div class="step">
+    <h2><span class="num">4</span> Design — มาตรการ (จัดอันดับด้วย π = Δ/c)</h2>
+    <p class="ev">Δ = ส่วนของ gap ที่คาดว่าปิดได้ (0–1) · c = วันทำงาน</p>
+    <div class="tbl"><table>
+      <tr><th>อันดับ</th><th>มาตรการ</th><th>ยิงที่</th><th>Δ</th><th>c</th><th>π = Δ/c</th></tr>
+      <tr><td class="n">1</td><td>ตัด inverse / leveraged / ETF เสื่อมค่า (ZSL, TBT, SQQQ, UVXY, BOIL, KOLD, UNG, SOXL, TQQQ, BITO)</td><td>RC4</td><td class="n">0.3</td><td class="n">0.1</td><td class="n">3.0</td></tr>
+      <tr class="pick"><td class="n">2</td><td><b>แบ่ง FIX_C 1,500 → SLV 975 + PLTR 525</b> · DIFF 50 ต่อ chain ตามที่ bot ใช้อยู่</td><td>RC1, RC3</td><td class="n">1.0</td><td class="n">1.0</td><td class="n">1.0</td></tr>
+      <tr><td class="n">3</td><td>ด่านคัดเลือก 4+1 (rolling 6 เดือน / 1 ปี, bootstrap ไร้ทิศทั้งช่วง / 2 ปี, แท่ง 15 นาที) ต้องผ่านทุกด่าน</td><td>RC7, RC5</td><td class="n">0.3</td><td class="n">0.5</td><td class="n">0.6</td></tr>
+      <tr><td class="n">4</td><td>ทบทวน w รายเดือนด้วย w* จาก σ, ρ 60 วัน (clip 0.55–0.85) ปรับผ่าน Rollover ที่ P_acted</td><td>RC6</td><td class="n">0.3</td><td class="n">0.5</td><td class="n">0.6</td></tr>
+      <tr><td class="n">5</td><td>shadow ledger SLV เดี่ยว (FIX_C 1,500 · DIFF 50) จากราคาเดียวกัน ไว้วัด CB ratio / E ratio แบบ live</td><td>RC1</td><td class="n">0.2</td><td class="n">0.5</td><td class="n">0.4</td></tr>
+      <tr><td class="n">6</td><td>ตัวสำรองถ้า PLTR ตกเกณฑ์ 2 เดือนติด: TSLA 0.80 / HOOD 0.80 / URA 0.65</td><td>RC5</td><td class="n">0.2</td><td class="n">1.0</td><td class="n">0.2</td></tr>
+    </table></div>
+
+    <h3 style="color:var(--accent);margin-top:18px">หลักฐาน: ผลเทียบ SLV เดี่ยว (ratio · CB &lt; 1 = burn น้อยลง · E ≥ 1 = ผ่าน)</h3>
+    <p class="ev">งบเดิม 1,500 · DIFF เป็นสัดส่วนเดียวกัน (3.33% ของ FIX_C แต่ละขา) เพื่อให้เห็นผลของสินทรัพย์ล้วน ๆ ·
+      h126 / h252 = rolling 6 เดือน / 1 ปี บนเส้นทางจริง 2022-02 → 2026-11 · bAll / b2y = bootstrap ตลาดไร้ทิศ (ทั้งช่วง / 2 ปีล่าสุด) ·
+      m15 = แท่ง 15 นาทีตามนาฬิกา bot ช่วง SLV ร่วง · ผ่าน = จำนวนด่าน daily ที่ผ่านทั้ง E, CB กลาง และ CB p5</p>
+    <div class="tbl"><table>
+      <tr><th>ตัวที่ 2</th><th>w SLV</th><th>ρ (1 ปี)</th><th>vol (1 ปี)</th>
+        <th>E ratio<br>h126 · h252 · bAll · b2y · m15</th>
+        <th>CB p5 ratio<br>h126 · h252 · bAll · b2y</th>
+        <th>CB กลาง ratio<br>h126 · h252 · bAll · b2y</th><th>CB m15</th><th>ผ่าน</th></tr>
+      <tr class="pick"><td><b>PLTR</b></td><td class="n">0.65</td><td class="n">0.25</td><td class="n">61%</td>
+        <td class="seq g">2.55 · 2.56 · 1.96 · 1.37 · 1.22</td><td class="seq g">0.91 · 0.97 · 0.95 · 0.86</td><td class="seq g">0.64 · 0.64 · 0.91 · 0.90</td><td class="n g">0.89</td><td class="n g">4/4</td></tr>
+      <tr><td>TSLA</td><td class="n">0.80</td><td class="n">0.26</td><td class="n">47%</td>
+        <td class="seq">1.82 · 1.78 · 1.39 · 1.09 · 1.18</td><td class="seq">0.85 · 0.86 · 0.90 · 0.85</td><td class="seq">0.96 · 0.99 · 0.90 · 0.91</td><td class="n g">0.84</td><td class="n">4/4</td></tr>
+      <tr><td>HOOD</td><td class="n">0.80</td><td class="n">0.35</td><td class="n">71%</td>
+        <td class="seq">1.88 · 1.84 · 1.58 · 1.28 · 1.31</td><td class="seq">0.77 · 0.82 · 0.90 · 0.94</td><td class="seq">0.89 · 0.93 · 0.90 · 0.94</td><td class="n b">1.08</td><td class="n">4/4</td></tr>
+      <tr><td>URA</td><td class="n">0.65</td><td class="n">0.56</td><td class="n">51%</td>
+        <td class="seq">1.29 · 1.29 · 1.16 · 1.03 · 1.08</td><td class="seq">0.93 · 0.79 · 0.90 · 0.92</td><td class="seq">0.81 · 0.86 · 0.89 · 0.91</td><td class="n">0.99</td><td class="n">4/4</td></tr>
+      <tr><td>CCJ</td><td class="n">0.80</td><td class="n">0.51</td><td class="n">52%</td>
+        <td class="seq">1.31 · 1.29 · 1.19 · 1.05 · 1.12</td><td class="seq">0.90 · 0.69 · 0.92 · 0.94</td><td class="seq">0.90 · 0.92 · 0.92 · 0.97</td><td class="n">0.99</td><td class="n">4/4</td></tr>
+      <tr><td>USO</td><td class="n">0.65</td><td class="n">−0.13</td><td class="n">51%</td>
+        <td class="seq">1.06 · 1.01 · 1.07 · <span class="b">0.98</span> · —</td><td class="seq g">0.63 · 0.66 · 0.77 · 0.72</td><td class="seq">0.81 · 0.89 · 0.72 · 0.66</td><td class="n">—</td><td class="n">3/4</td></tr>
+      <tr><td>NVDA</td><td class="n">0.70</td><td class="n">0.29</td><td class="n">52%</td>
+        <td class="seq">1.88 · 1.83 · 1.36 · <span class="b">0.99</span> · —</td><td class="seq">0.89 · <span class="b">1.20</span> · 0.92 · 0.81</td><td class="seq">0.68 · 0.78 · 0.89 · 0.81</td><td class="n">—</td><td class="n">2/4</td></tr>
+      <tr class="trap"><td><b>ZSL</b> ⚠️</td><td class="n">0.70</td><td class="n">−0.99</td><td class="n">129%</td>
+        <td class="seq">1.94 · 2.03 · 1.94 · 1.94 · 1.93</td><td class="seq">0.13 · 0.14 · 0.13 · 0.14</td><td class="seq">0.29 · 0.32 · 0.17 · 0.18</td><td class="n">0.09</td><td class="n">4/4 ⚠️</td></tr>
+    </table></div>
+    <p class="ev">สแกนทั้งหมด 59 ตัว (ETF สินค้าโภคภัณฑ์ / พันธบัตร / ดอลลาร์ / ดัชนี / คริปโต / หุ้นรายตัว) ·
+      ตัว vol &lt; 30% ไม่มีตัวไหนผ่าน E ≥ 1 ·
+      เติม PLTR บน SLV 1,500 เดิม (รวม 2,308) ได้ E ×2.1–3.9 แต่ Cash Burn เป็นเงินลึกขึ้น (หาง p5 ×1.33–1.50) — ลดได้เฉพาะเมื่อแบ่งงบเดิม ·
+      ถ้าคง DIFF 50 ทุก chain (ค่าที่ bot ใช้อยู่) PLTR ได้ E ×1.42–2.66 และ CB ×0.48–0.95 ผ่านครบทุกด่านเช่นกัน</p>
+  </div>
+
+  <!-- STEP 5 -->
+  <div class="step">
+    <h2><span class="num">5</span> Do it — ลงมือ + วัดผล</h2>
+    <div class="tbl"><table>
+      <tr><th>การกระทำ</th><th>ผู้รับผิดชอบ</th><th>เริ่ม</th><th>จบ</th></tr>
+      <tr><td>เปิด PAPER (LEGO_MODE=paper): chain SLV FIX_C 975 + chain PLTR FIX_C 525 · DIFF 50 · DNA ชุดเดียวกับ chain เดิม</td><td>F</td><td class="d">2026-11-25</td><td class="d">2026-12-09</td></tr>
+      <tr><td>สร้าง shadow ledger SLV เดี่ยว (FIX_C 1,500 · DIFF 50) จากแท่ง 15 นาทีเดียวกัน คำนวณ K1–K3 ทุกสัปดาห์</td><td>F</td><td class="d">2026-11-25</td><td class="d">2027-05-24</td></tr>
+      <tr><td>ขึ้น PROD ถ้า PAPER 2 สัปดาห์ได้ CB ratio ≤ 1.00 · E ratio ≥ 1.00 และไม่มี error ฝั่ง execution</td><td>F</td><td class="d">2026-12-10</td><td class="d">2026-12-10</td></tr>
+      <tr><td>ทบทวนรายเดือน: σ, ρ 60 วัน → w* · ปรับ FIX_C ผ่าน Rollover เมื่อ |w* − w| ≥ 0.05 · ไต่ ladder ตามผล</td><td>F</td><td class="d">2027-01-04</td><td class="d">2027-05-03</td></tr>
+      <tr><td>ประเมิน 6 เดือน: CB ratio, E ratio, A เทียบ shadow → คง / เปลี่ยน w / เปลี่ยนตัวที่ 2</td><td>F</td><td class="d">2027-05-24</td><td class="d">2027-05-24</td></tr>
+    </table></div>
+
+    <h3 style="color:var(--accent);margin-top:16px">KPI</h3>
+    <div class="eq"><span class="lbl">K1 CB ratio · เป้า ≤ 0.90 · รายสัปดาห์</span>CB_ratio = CB_pair / CB_shadow ,  CB = min(0, min_t Σᵢ Aᵢ(t))<span class="note">สูตรเดียวกับ lego_goal.cash_timeline (แท็บ 🎯 Payoff → รวมพอร์ต)</span></div>
+    <div class="eq"><span class="lbl">K2 E ratio · เป้า ≥ 1.00 · รายสัปดาห์</span>E_ratio = (Eₙ,SLV + Eₙ,PLTR) / Eₙ,shadow ,  Eₙ = Aₙ − FIX_C · ln(P_acted / P₀)</div>
+    <div class="eq"><span class="lbl">K3 ρ เตือนล่วงหน้า · เป้า ≤ 0.45 · รายเดือน</span>ρ_60d = corr(r_SLV, r_PLTR) ของผลตอบแทนรายวัน 60 วันล่าสุด</div>
+
+    <h3 style="color:var(--accent);margin-top:16px">สมการวัดผล &amp; ประเมินผล</h3>
+    <div class="eq"><span class="lbl">เงินสดของ chain</span>Aᵢ(t) ≈ Fᵢ · Σ(P / P_acted − 1) = Rᵢ + Eᵢ ,  Rᵢ = Fᵢ · ln(P_acted / P₀)<span class="note">Cash Burn คือ drawdown ใต้ศูนย์ของ ΣAᵢ ไม่ใช่ของ E</span></div>
+    <div class="eq"><span class="lbl">E ที่คาดไว้</span>E_ratio ≈ w + (1 − w) · k² ,  k = σ_B / σ_SLV<span class="note">k &lt; 1 → E ตกเสมอ</span></div>
+    <div class="eq"><span class="lbl">CB ที่คาดไว้</span>CB_ratio ≈ σ_p / σ_SLV ,  σ_p² = w²σ_S² + (1 − w)²σ_B² + 2w(1 − w)ρσ_Sσ_B<span class="note">ρ ≥ 0 และ k ≥ 1 → ลดได้ไม่เกิน ~29% (ρ = 0, k = 1, w = 0.5) · มากกว่านั้นต้องใช้ ρ &lt; 0</span></div>
+    <div class="eq"><span class="lbl">น้ำหนักที่ CB ต่ำสุด</span>w* = (k² − ρk) / (1 + k² − 2ρk)<span class="note">clip 0.55–0.85 เพื่อคง SLV เป็นขาหลัก</span></div>
+    <div class="eq"><span class="lbl">Goal attainment (ยิ่งต่ำยิ่งดี)</span>A_CB = 0.90 / CB_ratio_n      (A_CB ≥ 1 = ถึงเป้า)</div>
+    <div class="eq"><span class="lbl">Progress ratio</span>P_n = (1 − CB_ratio_n) / (1 − 0.90)      (P_n ≥ 1 = ปิด gap ครบ)</div>
+    <div class="eq"><span class="lbl">คะแนนรวม</span>S = 0.6 · min(1, P_n) + 0.4 · min(1, E_ratio_n)</div>
+
+    <div class="loop">
+      <h3 style="margin-top:0;color:var(--warn)">🔁 Control loop — เมื่อยังไม่บรรลุเป้าหมาย</h3>
+      <div class="eq"><span class="lbl">สมการควบคุม (error)</span>e_n = CB_ratio_n − 0.90      (บวก = ยังไม่ถึงเป้า · เงื่อนไขร่วม E_ratio_n ≥ 1)</div>
+      <div class="eq"><span class="lbl">อัตราการลู่เข้า</span>r_n = |e_n| / |e_(n−1)|</div>
+      <div class="eq"><span class="lbl">การแก้ไข (K = 1.0)</span>u_(n+1) = K · e_n  → เลื่อน w เข้าหา w* เป็นระยะ u (สูงสุด 0.10 ต่อรอบ)<span class="note">ถ้า E_ratio &lt; 1 ให้เลื่อนไปทางขาที่ vol สูงกว่าแทน</span></div>
+      <p><b>เงื่อนไขหยุด:</b> |e_n| ≤ ε = 0.02 หรือ e_n ≤ 0 พร้อม E_ratio_n ≥ 1 → บรรลุเป้าหมาย · n_max = 6 รอบ (รายเดือน) · ถ้าไม่ → ไต่ escalation ladder:</p>
+      <div class="tbl"><table class="ladder">
+        <tr><th>สถานการณ์</th><th>แปลว่า</th><th>วนกลับไป</th></tr>
+        <tr><td>r_n &lt; 1 (ช่องว่างหด)</td><td>แผนได้ผล ต้องทำซ้ำ</td><td>Step 5 · เลื่อน w ด้วย u = K·e_n ผ่าน Rollover</td></tr>
+        <tr><td>r_n ≈ 1 สองเดือนติด หรือ ρ_60d &gt; 0.45</td><td>PLTR หมดผลกระจายความเสี่ยง</td><td>Step 3 · วัด σ, ρ ใหม่ รันด่าน 4+1 ซ้ำ เปลี่ยนเป็นตัวสำรอง</td></tr>
+        <tr><td>r_n &gt; 1 (แย่ลง)</td><td>ปัญหาอยู่ที่อื่น</td><td>Step 2 · ตลาดร่วงพร้อมกันทั้งกระดาน, fill/slippage, ค่า DIFF ต่อ chain</td></tr>
+        <tr><td>CB ratio &gt; 0.95 หลัง 6 รอบ</td><td>เป้าเกินเพดานของ ρ ≥ 0</td><td>Step 1 · ปรับเป้าเป็น 0.95 หรือยอมทิ้งทิศทางของเงินโดยรู้ตัว (hedge ด้วย ZSL)</td></tr>
+      </table></div>
+    </div>
+  </div>
+
+  <div class="step">
+    <h2><span class="num">ⓘ</span> ข้อมูลและสมมติฐาน</h2>
+    <ul class="assume">
+      <li>ราคา: Webull daily bars 2022-02-11 → 2026-11-23 (1,200 แท่ง, 59 ตัวเลือก, ปรับ split แล้ว) · แท่ง 15 นาที RTH 2026-09-18 → 2026-11-23</li>
+      <li>กฎ bot จาก PROD (QBTS, RGTI, USAR): FIX_C 1,500 · DIFF 50 (|gap| ที่ act ต่ำสุด 50.18, ที่ PASS สูงสุด 49.83) · DNA signal = 1 ทุกแถว (1,118 แถว) · ยังไม่มี chain SLV</li>
+      <li>bootstrap: block 21 วัน ลบค่าเฉลี่ยผลตอบแทนอย่างง่าย (ตลาดไร้ทิศ) 1,500 เส้นทาง × 1 ปี · rolling เริ่มทุก 5 วันทำการ</li>
+      <li>หุ้นจริง (เศษหุ้น 0.01) ไม่รวม LEAPS: SLV × 100 = 3,891 และ PLTR × 100 = 15,936 USD ใหญ่กว่า FIX_C ของแต่ละขา</li>
+      <li>ไม่รวมค่าธรรมเนียม / slippage · ด่าน daily ใช้ราคาปิด จึงนับรอบเทรดน้อยกว่า bot จริง (ตรวจซ้ำด้วยแท่ง 15 นาทีแล้ว)</li>
+      <li>เป็นการวิเคราะห์เชิงคณิตศาสตร์จากข้อมูลย้อนหลัง ไม่ใช่คำแนะนำการลงทุน</li>
+    </ul>
+  </div>
+
+  <footer>สร้างด้วย five-step-planner · Goals → Problems → Diagnosis → Design → Do it · JSON: slv_pair_cash_burn_5_step_plan.json</footer>
+</div>
+</body>
+</html>

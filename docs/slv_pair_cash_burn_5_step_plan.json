@@ -1,0 +1,376 @@
+{
+  "framework": "5-step-process",
+  "language": "th",
+  "step_1_goals": {
+    "raw_goal": "silver slv เลือกเป็น asset หลัก · goal คือ หาอีก 1 asset มาลดการ Cash Burn ได้ และยังได้ค่า e เท่าเดิมหรือมากขึ้น",
+    "refined_goal": "ใช้ SLV เป็นขาหลัก แล้วเลือกสินทรัพย์ตัวที่ 2 หนึ่งตัวมาแบ่งงบ FIX_C เดิม 1,500 USD (ไม่เติมเงิน) ให้ Cash Burn รวมพอร์ต = min(0, min_t ΣAᵢ(t)) ตื้นกว่ารัน SLV เดี่ยวอย่างน้อย 10% ขณะที่ ΣEₙ ≥ Eₙ ของ SLV เดี่ยว โดยไม่ใช้สินทรัพย์ inverse / leveraged ที่ทำให้ E เพิ่มแต่ R ลดเท่ากัน (E ปลอม)",
+    "target_metric": {
+      "name": "CB ratio = Cash Burn ของคู่ ÷ Cash Burn ของ SLV เดี่ยว (shadow ledger ที่ FIX_C 1,500 · DIFF 50)",
+      "current": 1.0,
+      "target": 0.9,
+      "unit": "เท่า (ยิ่งต่ำยิ่งดี)",
+      "horizon": "6 เดือน (2026-11-25 → 2027-05-24) ทบทวนทุกเดือน"
+    },
+    "success_criteria": [
+      "CB ratio ≤ 0.90 (Cash Burn ตื้นลง ≥ 10%) ทั้งค่ากลางและหาง p5 ใน backtest และใน live เทียบ shadow SLV เดี่ยว",
+      "E ratio = (Eₙ ขา SLV + Eₙ ขาตัวที่ 2) ÷ Eₙ ของ SLV เดี่ยว ≥ 1.00",
+      "A guard: ตัวที่ 2 ไม่ใช่ inverse / leveraged / ETF ที่เสื่อมค่าเอง และในการทดสอบแบบตลาดไร้ทิศ A ของคู่ไม่ต่ำกว่า SLV เดี่ยว",
+      "ใช้ bot เดิมได้ทันที: 2 chain แยก (FIX_C, DIFF ต่อ chain) ไม่แก้สมการ ledger · Cash Burn อ่านได้จากแท็บ 🎯 Payoff → รวมพอร์ต"
+    ]
+  },
+  "step_2_problems": [
+    {
+      "id": "P1",
+      "description": "SLV เดี่ยวมี Cash Burn ลึก: 18 ก.ย. → 23 พ.ย. 2026 SLV ลง 60.09 → 38.91 (−35%) บนแท่ง 15 นาทีตามกฎ bot ได้ Cash Burn −670.7 USD (44.7% ของ FIX_C) · bootstrap ตลาดไร้ทิศ 1 ปี หาง p5 ≈ −1,000 USD",
+      "gap_value": "CB ratio 1.00 → 0.90 (ต้องลด ≥ 10%)",
+      "severity": 5
+    },
+    {
+      "id": "P2",
+      "description": "E กับ Cash Burn มาจากความผันผวนชุดเดียวกัน: ตัวที่ vol ต่ำ (GLD, TLT, SPY, UUP, DBA) ลด CB ได้แต่ E ตกต่ำกว่า SLV เดี่ยว 3–5% จึงตกเกณฑ์ E",
+      "gap_value": "E ratio ต้อง ≥ 1.00 ขณะ CB ratio ≤ 0.90",
+      "severity": 4
+    },
+    {
+      "id": "P3",
+      "description": "ตัวที่ลด CB ได้มากสุดคือ ZSL (−2x silver): SLV 70% + ZSL 30% ได้ CB ×0.13–0.32 และ E ×1.94 ทุกการทดสอบ แต่ A (เงินสดจริง) ช่วงเงินขึ้นหายไป 145–350 USD เพราะคู่นี้ลบทิศทางของเงินทิ้ง",
+      "gap_value": "ตัวที่ผ่านเกณฑ์บนกระดาษแต่ทำลายเหตุผลที่เลือก SLV",
+      "severity": 4
+    },
+    {
+      "id": "P4",
+      "description": "regime เปลี่ยน: vol ของ SLV 39% ทั้งช่วง → 64% ใน 1 ปีล่าสุด · ρ ของ CCJ/URA กับ SLV ขึ้นเป็น 0.51–0.56 · ทฤษฎีที่ vol 1 ปีล่าสุด ให้ E ratio ของ SLV+PLTR 65/35 เพียง 0.97",
+      "gap_value": "w ที่ดีที่สุดเลื่อนได้ 0.47–0.79 ตาม regime",
+      "severity": 3
+    },
+    {
+      "id": "P5",
+      "description": "Hindsight bias: PLTR, HOOD, NVDA ขึ้นแรงในปี 2023–2026 จึงดูดีใน backtest เส้นทางจริงเพราะเทรนด์ ไม่ใช่เพราะช่วยลด CB",
+      "gap_value": "ต้องแยกผลจาก ρ/σ ออกจากผลของเทรนด์",
+      "severity": 3
+    }
+  ],
+  "step_3_diagnosis": [
+    {
+      "problem_id": "P1",
+      "root_causes": [
+        {
+          "id": "RC1",
+          "cause": "ขาเดียวไม่มีอะไรหักล้าง: Aₙ ≈ FIX_C · Σ(Pₙ/P_acted − 1) คือผลตอบแทนอย่างง่ายสะสม → Cash Burn คือ drawdown ใต้ศูนย์ของเส้นนี้",
+          "why_chain": [
+            "ทำไม Cash Burn ลึก? → Aₙ สะสมติดลบเมื่อราคาลง",
+            "ทำไม Aₙ ติดลบ? → ΔAₙ = FIX_C·(P/P_acted − 1) ทุกครั้งที่ bot ซื้อเติมตอนราคาลง",
+            "ทำไมไม่มีอะไรชดเชย? → มีขาเดียว ทุกการเคลื่อนไหวของ SLV ไหลเข้า A ตรง ๆ",
+            "จึงแก้ที่: เพิ่มขาที่เคลื่อนไหวไม่พร้อม SLV (ρ ต่ำ) ด้วยงบเดิม"
+          ],
+          "impact_weight": 0.7,
+          "evidence": "สมการ ledger ของ bot (lego_dash_core.gated_rebalancing_cashflow_from_prices) · การจำลองบนแท่ง 15 นาทีจริง: CB −670.7"
+        },
+        {
+          "id": "RC2",
+          "cause": "SLV อยู่ใน regime ผันผวนสูงหลังขึ้น 21.83 → 105.60 (Q1 2026) แล้วลงเหลือ 38.91",
+          "why_chain": [
+            "ทำไมตอนนี้เสี่ยง? → vol 1 ปีล่าสุด 64% เทียบ 39% ทั้งช่วง",
+            "ทำไมกระทบ CB? → CB ∝ σ·√t ของขาหลัก"
+          ],
+          "impact_weight": 0.3,
+          "evidence": "Webull daily bars 2022-02-11 → 2026-11-23"
+        }
+      ]
+    },
+    {
+      "problem_id": "P2",
+      "root_causes": [
+        {
+          "id": "RC3",
+          "cause": "E ≈ ½·Σ Fᵢσᵢ²·t แต่ CB ∝ σ_p = √(ΣΣ wᵢwⱼρᵢⱼσᵢσⱼ) → ทางเดียวที่ CB ลดโดย E ไม่ลดคือ σ_B ≥ σ_SLV และ ρ ต่ำ",
+          "why_chain": [
+            "ทำไมตัว vol ต่ำทำ E ตก? → E ratio = w + (1 − w)·k² < 1 เมื่อ k = σ_B/σ_SLV < 1",
+            "ทำไมตัว vol สูงมาก (QBTS, RGTI, SOXL) ไม่ช่วย CB? → σ_p โตตาม σ_B จนกลบผลกระจายความเสี่ยง",
+            "จึงต้องหา: vol ใกล้หรือสูงกว่า SLV เล็กน้อย + ρ ≤ 0.3"
+          ],
+          "impact_weight": 1.0,
+          "evidence": "สแกน 59 ตัว: ตัว vol < 30% ไม่มีตัวไหนผ่าน E ≥ 1 ในทุกการทดสอบ"
+        }
+      ]
+    },
+    {
+      "problem_id": "P3",
+      "root_causes": [
+        {
+          "id": "RC4",
+          "cause": "inverse/leveraged ETF ปรับพอร์ตเองทุกวันแบบซื้อแพงขายถูก → ln ราคามันลอยลง · E ที่ bot เก็บเพิ่มถูกหักใน R เท่ากัน · ที่ SLV:ZSL = 2:1 ได้ A = F·(3w − 2)·Σr_SLV ≈ 0",
+          "why_chain": [
+            "ทำไม E เพิ่ม 2 เท่า? → ZSL ผันผวน 2 เท่าของเงิน E ∝ σ²",
+            "ทำไมเงินสดไม่เพิ่ม? → A = R + E และ R ของ ZSL ดิ่งจากการ reset รายวัน",
+            "ผลข้างเคียง: ถ้าใช้ E ไปจ่าย LEAPS หรือ Option Scale ขยาย FIX_C จะขยายด้วยเงินที่ไม่มีจริง"
+          ],
+          "impact_weight": 1.0,
+          "evidence": "ZSL ใน backtest เส้นทางจริง: A −145 ถึง −350 USD เทียบ SLV เดี่ยว · ตลาดไร้ทิศ A −97 ถึง +6 USD (ไม่ได้เงินสดเพิ่มทั้งที่ E ×1.94)"
+        }
+      ]
+    },
+    {
+      "problem_id": "P4",
+      "root_causes": [
+        {
+          "id": "RC5",
+          "cause": "กลุ่มโลหะ/พลังงานเคลื่อนไหวด้วยกันมากขึ้นในปี 2025–26 (ρ CCJ 0.36 → 0.51, URA 0.45 → 0.56)",
+          "why_chain": [
+            "ทำไม ρ ขึ้น? → ธีม commodity / hard asset เดียวกัน",
+            "ผล: ตัวที่ดีในอดีตลดผลกระจายความเสี่ยงในอนาคต"
+          ],
+          "impact_weight": 0.6,
+          "evidence": "ρ ทั้งช่วงเทียบ ρ 252 วันล่าสุด"
+        },
+        {
+          "id": "RC6",
+          "cause": "k = σ_B/σ_SLV เปลี่ยน → w ที่ CB ต่ำสุด w* = (k² − ρk)/(1 + k² − 2ρk) เลื่อน (PLTR: 0.79 ทั้งช่วง → 0.47 ปีล่าสุด)",
+          "why_chain": [
+            "ทำไม w คงที่ไม่พอ? → vol ของ SLV ขึ้นจนเท่า PLTR",
+            "จึงต้อง: ทบทวน w รายเดือน"
+          ],
+          "impact_weight": 0.4,
+          "evidence": "σ, ρ จาก daily bars"
+        }
+      ]
+    },
+    {
+      "problem_id": "P5",
+      "root_causes": [
+        {
+          "id": "RC7",
+          "cause": "backtest บนเส้นทางราคาจริงมีเพียงเส้นเดียว จึงปนผลของเทรนด์",
+          "why_chain": [
+            "ทำไมตัวที่ขึ้นแรงดูดี? → A บวกจากเทรนด์ช่วยดัน min ΣA ขึ้น",
+            "จึงแก้: block bootstrap ที่ลบค่าเฉลี่ยผลตอบแทนออก (ตลาดไร้ทิศ) ให้เหลือแต่ σ, ρ และหางอ้วนจริง"
+          ],
+          "impact_weight": 1.0,
+          "evidence": "NVDA ผ่าน 2/4 · IBIT ผ่าน 1/4 เมื่อเพิ่มชุด drift-neutral"
+        }
+      ]
+    }
+  ],
+  "step_4_design": [
+    {
+      "id": "S1",
+      "targets_root_cause": "RC4",
+      "intervention": "ตัด inverse / leveraged / ETF เสื่อมค่า (ZSL, TBT, SQQQ, UVXY, BOIL, KOLD, UNG, SOXL, TQQQ, BITO) ออกจากตัวเลือก",
+      "expected_effect": 0.3,
+      "cost": 0.1,
+      "priority_score": 3.0,
+      "rank": 1
+    },
+    {
+      "id": "S2",
+      "targets_root_cause": "RC1, RC3",
+      "intervention": "แบ่ง FIX_C 1,500 → SLV 975 (w = 0.65) + PLTR 525 · DIFF 50 ต่อ chain ตามที่ bot ใช้อยู่ · ผ่านทั้ง 5 ด่าน: CB ×0.48–0.97, E ×1.22–2.66",
+      "expected_effect": 1.0,
+      "cost": 1.0,
+      "priority_score": 1.0,
+      "rank": 2
+    },
+    {
+      "id": "S3",
+      "targets_root_cause": "RC7, RC5",
+      "intervention": "ด่านคัดเลือก 4+1: rolling 6 เดือน / 1 ปี, bootstrap ตลาดไร้ทิศ (ทั้งช่วง / 2 ปีล่าสุด) และแท่ง 15 นาทีตามนาฬิกา bot · ต้องผ่านทุกด่าน",
+      "expected_effect": 0.3,
+      "cost": 0.5,
+      "priority_score": 0.6,
+      "rank": 3
+    },
+    {
+      "id": "S4",
+      "targets_root_cause": "RC6",
+      "intervention": "ทบทวน w ทุกเดือนด้วย w* จาก σ, ρ 60 วันล่าสุด (clip 0.55–0.85) แล้วปรับผ่าน Rollover ที่ P_acted",
+      "expected_effect": 0.3,
+      "cost": 0.5,
+      "priority_score": 0.6,
+      "rank": 4
+    },
+    {
+      "id": "S5",
+      "targets_root_cause": "RC1",
+      "intervention": "shadow ledger: คำนวณ SLV เดี่ยว (FIX_C 1,500 · DIFF 50) จากราคาเดียวกันเพื่อวัด CB ratio และ E ratio แบบ live",
+      "expected_effect": 0.2,
+      "cost": 0.5,
+      "priority_score": 0.4,
+      "rank": 5
+    },
+    {
+      "id": "S6",
+      "targets_root_cause": "RC5",
+      "intervention": "ตัวสำรอง ถ้า PLTR ตกเกณฑ์ 2 เดือนติด: TSLA (w 0.80) หรือ HOOD (w 0.80) หรือ URA (w 0.65) ที่ผ่านด่าน daily ครบ 4/4 · TSLA ผ่านด่าน 15 นาทีด้วย",
+      "expected_effect": 0.2,
+      "cost": 1.0,
+      "priority_score": 0.2,
+      "rank": 6
+    }
+  ],
+  "step_5_do_it": {
+    "action_plan": [
+      {
+        "action": "เปิด PAPER (LEGO_MODE=paper): chain SLV FIX_C 975 + chain PLTR FIX_C 525 · DIFF 50 · DNA ชุดเดียวกับ chain เดิม",
+        "owner": "F",
+        "start": "2026-11-25",
+        "end": "2026-12-09",
+        "depends_on": []
+      },
+      {
+        "action": "สร้าง shadow ledger SLV เดี่ยว (FIX_C 1,500 · DIFF 50) จากราคาแท่ง 15 นาทีเดียวกัน แล้วคำนวณ K1–K3 ทุกสัปดาห์",
+        "owner": "F",
+        "start": "2026-11-25",
+        "end": "2027-05-24",
+        "depends_on": []
+      },
+      {
+        "action": "ขึ้น PROD ถ้า PAPER 2 สัปดาห์ได้ CB ratio ≤ 1.00 · E ratio ≥ 1.00 และไม่มี error ฝั่ง execution",
+        "owner": "F",
+        "start": "2026-12-10",
+        "end": "2026-12-10",
+        "depends_on": ["เปิด PAPER", "shadow ledger"]
+      },
+      {
+        "action": "ทบทวนรายเดือน: σ, ρ 60 วัน → w* · ปรับ FIX_C ผ่าน Rollover เมื่อ |w* − w| ≥ 0.05 · ไต่ escalation ladder ตามผล",
+        "owner": "F",
+        "start": "2027-01-04",
+        "end": "2027-05-03",
+        "depends_on": ["ขึ้น PROD"]
+      },
+      {
+        "action": "ประเมิน 6 เดือน: CB ratio, E ratio, A เทียบ shadow → คง / เปลี่ยน w / เปลี่ยนตัวที่ 2",
+        "owner": "F",
+        "start": "2027-05-24",
+        "end": "2027-05-24",
+        "depends_on": ["ทบทวนรายเดือน"]
+      }
+    ],
+    "measurement": {
+      "kpis": [
+        {
+          "name": "K1 CB ratio",
+          "formula": "CB_pair / CB_shadow · CB = min(0, min_t Σᵢ Aᵢ(t)) (สูตรเดียวกับ lego_goal.cash_timeline)",
+          "target": 0.9,
+          "frequency": "รายสัปดาห์"
+        },
+        {
+          "name": "K2 E ratio",
+          "formula": "(Eₙ,SLV + Eₙ,PLTR) / Eₙ,shadow · Eₙ = Aₙ − FIX_C·ln(P_acted/P₀) ต่อ chain",
+          "target": 1.0,
+          "frequency": "รายสัปดาห์"
+        },
+        {
+          "name": "K3 ρ เตือนล่วงหน้า",
+          "formula": "ρ_60d = corr(ผลตอบแทนรายวัน SLV, PLTR) 60 วันล่าสุด",
+          "target": 0.45,
+          "frequency": "รายเดือน"
+        }
+      ],
+      "evaluation_equations": [
+        {
+          "name": "เงินสดของ chain",
+          "formula": "Aᵢ(t) ≈ Fᵢ · Σ(P/P_acted − 1) = Rᵢ + Eᵢ · Rᵢ = Fᵢ·ln(P_acted/P₀)",
+          "interpret": "Cash Burn ของพอร์ตคือ drawdown ใต้ศูนย์ของ ΣAᵢ ไม่ใช่ของ E"
+        },
+        {
+          "name": "E ที่คาดไว้ (ทฤษฎี)",
+          "formula": "E ratio ≈ w + (1 − w)·k² · k = σ_B / σ_SLV",
+          "interpret": "k < 1 → E ตกเสมอ · ต้องเลือกตัวที่ vol ไม่ต่ำกว่า SLV"
+        },
+        {
+          "name": "CB ที่คาดไว้ (ทฤษฎี)",
+          "formula": "CB ratio ≈ σ_p / σ_SLV · σ_p² = w²σ_S² + (1 − w)²σ_B² + 2w(1 − w)ρσ_Sσ_B",
+          "interpret": "ρ ≥ 0 → ลดได้ไม่เกิน ~29% (ที่ ρ = 0, k = 1, w = 0.5) · ลดมากกว่านั้นต้องใช้ ρ < 0"
+        },
+        {
+          "name": "น้ำหนักที่ CB ต่ำสุด",
+          "formula": "w* = (k² − ρk) / (1 + k² − 2ρk)",
+          "interpret": "ใช้ทบทวน w รายเดือน (clip 0.55–0.85 เพื่อคง SLV เป็นขาหลัก)"
+        },
+        {
+          "name": "Goal attainment (ยิ่งต่ำยิ่งดี)",
+          "formula": "A_CB = 0.90 / CB ratio_n",
+          "interpret": "A_CB ≥ 1 = ถึงเป้า"
+        },
+        {
+          "name": "Progress ratio",
+          "formula": "P_n = (1 − CB ratio_n) / (1 − 0.90)",
+          "interpret": "P_n ≥ 1 = ปิด gap ครบ"
+        },
+        {
+          "name": "คะแนนรวม",
+          "formula": "S = 0.6·min(1, P_n) + 0.4·min(1, E ratio_n)",
+          "interpret": "S = 1 เมื่อทั้ง CB และ E ผ่าน"
+        }
+      ],
+      "loop": {
+        "control_equation": "e_n = CB ratio_n − 0.90 (ค่าบวก = ยังไม่ถึงเป้า) · เงื่อนไขร่วม E ratio_n ≥ 1",
+        "convergence_rate": "r_n = |e_n| / |e_{n-1}|",
+        "stop_condition": "|e_n| <= epsilon หรือ e_n ≤ 0 และ E ratio_n ≥ 1",
+        "epsilon": 0.02,
+        "gain_K": 1.0,
+        "correction": "u_{n+1} = K * e_n → เลื่อน w เข้าหา w* เป็นระยะ u_{n+1} (สูงสุด 0.10 ต่อรอบ) · ถ้า E ratio < 1 เลื่อนไปทางขาที่ vol สูงกว่าแทน",
+        "n_max": 6,
+        "escalation_ladder": [
+          {
+            "if": "r_n < 1 (shrinking, not yet at epsilon)",
+            "loop_back_to": "step_5",
+            "action": "ทำซ้ำ เลื่อน w เข้าหา w* ด้วย u_{n+1} = K·e_n ผ่าน Rollover"
+          },
+          {
+            "if": "r_n ~ 1 (stalled) 2 เดือนติด หรือ K3 ρ_60d > 0.45",
+            "loop_back_to": "step_3",
+            "action": "วินิจฉัยใหม่: วัด σ, ρ ใหม่ รันด่าน 4+1 ซ้ำ เปลี่ยนเป็นตัวสำรอง (TSLA / HOOD / URA)"
+          },
+          {
+            "if": "r_n > 1 (diverging)",
+            "loop_back_to": "step_2",
+            "action": "หาปัญหาจริงใหม่: ตลาดร่วงพร้อมกันทั้งกระดาน, fill/slippage, ค่า DIFF ต่อ chain"
+          },
+          {
+            "if": "still far after n cycles (CB ratio > 0.95 หลัง 6 รอบ)",
+            "loop_back_to": "step_1",
+            "action": "ปรับเป้าเป็น 0.95 หรือยอมรับเพดานของ ρ ≥ 0 · ถ้าต้องการลดมากกว่านี้ต้องเลือกโดยรู้ตัวว่ายอมทิ้งทิศทางของเงิน (hedge ด้วย ZSL)"
+          }
+        ]
+      }
+    }
+  },
+  "evidence": {
+    "data": "Webull daily bars 2022-02-11 → 2026-11-23 (1,200 แท่ง, 59 ตัวเลือก) · แท่ง 15 นาที RTH 2026-09-18 → 2026-11-23 (1,200 แท่ง)",
+    "bot_rule": "FIX_C 1,500 · DIFF 50 USD (จาก PROD: |gap| ที่ act ต่ำสุด 50.18, ที่ PASS สูงสุด 49.83) · DNA signal = 1 ทุกแถว · ΔA = F·(P/P_acted − 1)",
+    "tests": [
+      "h126: rolling 6 เดือน เริ่มทุก 5 วัน (215 หน้าต่าง)",
+      "h252: rolling 1 ปี (190 หน้าต่าง)",
+      "bAll: block bootstrap 21 วัน ลบค่าเฉลี่ยผลตอบแทน (ตลาดไร้ทิศ) ทั้งช่วง 1,500 เส้นทาง × 1 ปี",
+      "b2y: เหมือน bAll แต่ใช้ 504 วันล่าสุด",
+      "m15: แท่ง 15 นาทีตามนาฬิกา bot ช่วง SLV ร่วง 60.09 → 38.91 (8 จุดเริ่มรายสัปดาห์)"
+    ],
+    "recommended": {
+      "pair": "SLV 975 + PLTR 525 (w = 0.65)",
+      "same_relative_DIFF": {
+        "h126": {"E": 2.55, "CB_median": 0.64, "CB_p5": 0.91},
+        "h252": {"E": 2.56, "CB_median": 0.64, "CB_p5": 0.97},
+        "bAll": {"E": 1.96, "CB_median": 0.91, "CB_p5": 0.95},
+        "b2y": {"E": 1.37, "CB_median": 0.90, "CB_p5": 0.86},
+        "m15": {"E": 1.22, "CB": 0.89, "full_period_CB_alone": -670.7, "full_period_CB_pair": -517.0, "full_period_E_alone": 21.9, "full_period_E_pair": 27.0}
+      },
+      "DIFF_50_each_chain": {
+        "h126": {"E": 2.52, "CB_median": 0.56, "CB_p5": 0.87},
+        "h252": {"E": 2.66, "CB_median": 0.48, "CB_p5": 0.95},
+        "bAll": {"E": 2.04, "CB_median": 0.86, "CB_p5": 0.92},
+        "b2y": {"E": 1.42, "CB_median": 0.88, "CB_p5": 0.86},
+        "m15": {"E": 1.50, "CB": 0.92, "full_period_CB_pair": -520.0, "full_period_E_pair": 33.0}
+      }
+    },
+    "add_on_warning": "ถ้าเติม PLTR บน SLV 1,500 เดิม (รวม 2,308) E ×2.1–3.9 แต่ Cash Burn เป็นเงินลึกขึ้น: หาง p5 ×1.33–1.50 · Cash Burn ลดได้เฉพาะเมื่อแบ่งงบเดิม"
+  },
+  "assumptions": [
+    "FIX_C 1,500 และ DIFF 50 อนุมานจาก 3 chain ใน PROD (QBTS, RGTI, USAR) · ยังไม่มี chain SLV",
+    "ทดสอบด้วยหุ้นจริง (เศษหุ้น 0.01) ไม่รวม LEAPS: SLV × 100 = 3,891 และ PLTR × 100 = 15,936 USD ใหญ่กว่า FIX_C ของแต่ละขา",
+    "ไม่รวมค่าธรรมเนียม / slippage · ด่าน daily ใช้ราคาปิด จึงนับรอบเทรดน้อยกว่า bot จริง (ตรวจซ้ำด้วยแท่ง 15 นาทีแล้ว)",
+    "Eₙ = Aₙ − FIX_C·ln(P_acted/P₀) ต่อ chain แล้วรวม · Cash Burn = min(0, min ΣAₙ) ตาม lego_goal.cash_timeline",
+    "ราคาจาก Webull ปรับ split แล้ว · ช่วงทดสอบ 4.8 ปี มีทั้งช่วงเงินนิ่ง (2022–24) และช่วงพุ่ง-ร่วง (2025–26)",
+    "เป็นการวิเคราะห์เชิงคณิตศาสตร์จากข้อมูลย้อนหลัง ไม่ใช่คำแนะนำการลงทุน"
+  ]
+}
