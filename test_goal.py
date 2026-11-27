@@ -464,6 +464,10 @@ def test_the_cash_figure_has_four_lines_without_the_en_line():
     assert fig.data.index(now_line) < fig.data.index(burn)                      # เส้นเทาอยู่ใต้เส้นแดง
     dots = [t for t in fig.data if t.legendgroup == "burn_now" and t.mode == "markers"]
     assert len(dots) == 1 and dots[0].marker.color == "#d03b3b" and dots[0].hoverinfo == "skip"
+    assert now_line.visible == "legendonly" == dots[0].visible                  # ค่าเริ่มต้นปิด · เปิดพร้อมกันจาก legend
+    assert dots[0].legendgroup == now_line.legendgroup == "burn_now"
+    assert all(t.visible is not False and t.visible != "legendonly" for t in fig.data
+               if t.legendgroup != "burn_now")                                  # เส้นอื่นยังเปิดตามเดิม
     assert [goal._utc(t) for t in dots[0].x] == [day(15), day(16), day(17)]     # เฉพาะจุดที่ขั้นเปลี่ยน
     assert list(dots[0].y) == [-60, -150, -100]                                 # 0→0 และ −100→−100 ไม่มีจุด
     assert fig.data.index(dots[0]) > fig.data.index(burn)                       # จุดแดงอยู่บนเส้นแดง
@@ -472,7 +476,7 @@ def test_the_cash_figure_has_four_lines_without_the_en_line():
     texts = [a.text for a in fig.layout.annotations]
     assert "คืนทุน ev 2026-12-21" in texts and "ตอนนี้" in texts and "t0 · P₀" in texts
     assert "Cash Burn <b>-150</b>" in texts and "ต้นทุน ev <b>+190</b>" in texts
-    assert "Burn ตอนนี้ <b>-100</b>" in texts
+    assert not any(t.startswith("Burn ตอนนี้") for t in texts)               # เส้นปิดอยู่ → ไม่มีป้ายปลายกราฟ
     assert not any(t.startswith("Eₙ <b>") for t in texts)                    # ไม่มีป้ายปลายเส้น Eₙ
     assert fig.layout.xaxis.type == "date"
 
