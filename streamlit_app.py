@@ -105,7 +105,7 @@ if getattr(_lego_webull_read, "SNAPSHOT_SCHEMA", 0) < 2:
     _lego_webull_read = importlib.reload(_lego_webull_read)
 if getattr(positions, "POSITIONS_SCHEMA", 0) < 2:   # 2 = LegoChain มี fills + t0 (กราฟเวลา)
     positions = importlib.reload(positions)
-if getattr(goal, "GOAL_SCHEMA", 0) < 11:         # 11 = กราฟเวลา + Cash Burn ตอนนี้ (ขั้นบันไดเทาบาง ไม่มีจุด)
+if getattr(goal, "GOAL_SCHEMA", 0) < 13:         # 13 = Cash Burn ตอนนี้ รายวัน (ขั้นเทาบาง + จุดแดง วันละ 1)
     goal = importlib.reload(goal)
 
 from lego_webull_read import WebullReadError, fetch_account_snapshot, redact
@@ -737,8 +737,8 @@ GOAL_CASH_NOTE = ("Eₙ และ Aₙ = ค่าที่ bot บันทึ�
                   "เส้นเฉลี่ยผ่าน Eₙ ตอนนี้ = การ์ด Eₙ สะสม (bot) (แท็บ Live ปรับ genesis baseline จึงอาจต่างเล็กน้อย) · "
                   "t0 = เวลาแถวแรกของ chain (ราคา P₀) · ค่าเฉลี่ยใช้วันปฏิทิน (รวมวันตลาดปิด) · "
                   "ต้นทุน ev ใช้ cost_price ของ LEAPS ใน Webull ลบ intrinsic ที่ P₀ · Cash Burn ติดลบเท่านั้น "
-                  "และค้างค่าที่ลึกที่สุด (รวมพอร์ต = รวม Aₙ ทุกตัวก่อน) · ขั้นบันไดเทาบาง = Cash Burn ตอนนี้ "
-                  "min(0, Σ Aₙ) ณ แต่ละเวลา (ไม่ค้างค่าลึกสุด)")
+                  "และค้างค่าที่ลึกที่สุด (รวมพอร์ต = รวม Aₙ ทุกตัวก่อน) · ขั้นบันไดเทาบาง + จุดแดง = Cash Burn ตอนนี้ "
+                  "รายวัน min(0, Σ Aₙ) ณ 00:00 UTC (= ปิดวันก่อนหน้า · วันละ 1 ขั้น 1 จุด · จุดสุดท้าย = ตอนนี้)")
 CHAIN_START_TTL_S = 3600                         # t0 ของ chain ไม่เปลี่ยน — อ่าน webull_lego_rows ทั้ง node ชั่วโมงละครั้ง
 _RUN_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 

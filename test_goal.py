@@ -363,6 +363,10 @@ def test_cash_burn_holds_the_deepest_negative_actual():
     up = goal.cash_timeline([timed(fills=[(1, 300.0, 1.0), (2, -50.0, 2.0)])], T_NOW)
     assert up["cash_burn"].tolist() == [0, 0, -50, -50]                                   # Aₙ บวก → 0 (ไม่เกิน 0)
     assert up["cash_burn_now"].tolist() == [0, 0, -50, -50]
+    daily = goal.daily_burn(df)                                     # fill ทุก 12 ชม. → รายวันโชว์แค่ค่าปิดวัน
+    assert daily["cash_burn_now"].tolist() == [0, 0, -400, -1200, -500, -500]
+    assert [t.hour for t in daily[goal.TIME]] == [15, 0, 0, 0, 0, 15]          # t0 · 00:00 UTC × 4 · ตอนนี้
+    assert goal.daily_burn(df.iloc[:0]).empty
     back = goal.cash_summary([timed(fills=[(1, -50.0, 1.0), (2, 300.0, 2.0)])], T_NOW)
     assert (back["cash_burn"], back["cash_burn_now"]) == (-50.0, 0.0)                    # Aₙ ล่าสุดบวก → 0
 
@@ -441,16 +445,22 @@ def test_the_cash_figure_has_four_lines_without_the_en_line():
     assert sorted(named, key=lambda n: named[n].legendrank) == [                     # ลำดับใน legend
                            "Eₙ เฉลี่ย 5.00 USD/วัน (ตั้งแต่ t0 P₀)",              # ไม่มีเส้น Eₙ ขั้นบันไดแล้ว
                            "ต้นทุน option (ev ไม่คิด intrinsic)", "Cash Burn สะสม (Aₙ ต่ำสุด, ≤ 0)",
-                           "Cash Burn ตอนนี้ (Aₙ ณ เวลานั้น, ≤ 0)"]
+                           "Cash Burn ตอนนี้ รายวัน (Aₙ ปิดวัน UTC, ≤ 0)"]
     assert np.allclose(named["ต้นทุน option (ev ไม่คิด intrinsic)"].y, 190.0)       # แนวนอนฝั่งบวก
     burn = named["Cash Burn สะสม (Aₙ ต่ำสุด, ≤ 0)"]
     assert max(burn.y) <= 0 and list(burn.y) == [0, -60, -150, -150, -150] and burn.line.shape == "hv"
-    now_line = named["Cash Burn ตอนนี้ (Aₙ ณ เวลานั้น, ≤ 0)"]                     # ขั้นบันไดเทาบางมาก ไม่มีจุด
-    assert list(now_line.y) == [0, -60, -150, -100, -100] and list(now_line.x) == list(burn.x)
-    assert now_line.mode == "lines" and now_line.marker.color is None and now_line.fill is None
+    now_line = named["Cash Burn ตอนนี้ รายวัน (Aₙ ปิดวัน UTC, ≤ 0)"]               # ขั้นเทาบาง + จุดแดง วันละ 1
+    day = (lambda d: pd.Timestamp(f"2026-11-{d}", tz="UTC"))
+    assert [goal._utc(t) for t in now_line.x] == [T_NOW - 4 * DAY, day(14), day(15), day(16), day(17), T_NOW]
+    assert list(now_line.y) == [0, 0, -60, -150, -100, -100]                    # ค่า ณ 00:00 = ปิดวันก่อนหน้า
+    assert now_line.mode == "lines+markers" and now_line.marker.color == "#d03b3b" and now_line.fill is None
+    assert list(now_line.marker.size) == [0, 5, 5, 5, 5, 5]                     # ไม่มีจุดที่ t0 · วันละ 1 จุด + ตอนนี้
     assert now_line.line.shape == "hv" and now_line.line.color == "#52514e"
     assert now_line.line.width <= 1 and now_line.line.dash is None
     assert fig.data.index(now_line) < fig.data.index(burn)                      # เส้นเทาอยู่ใต้เส้นแดง
+    top = next(t for t in fig.data if t.legendgroup == "burn_now" and t.mode == "markers")
+    assert fig.data.index(top) > fig.data.index(burn) and top.hoverinfo == "skip"   # จุดแดงซ้ำไว้บนเส้นแดง
+    assert list(top.y) == list(now_line.y) and list(top.marker.size) == list(now_line.marker.size)
     projected = next(t for t in fig.data if t.name.endswith("· คาด"))
     assert projected.line.dash == "dash" and projected.y[-1] == pytest.approx(190.0)
     texts = [a.text for a in fig.layout.annotations]
@@ -469,6 +479,31 @@ def test_the_daily_average_line_is_dark_green_in_both_themes():
         trend = [t for t in fig.data if t.legendgroup == "trend" and t.mode == "lines"]
         assert len(trend) == 2 and {t.line.color for t in trend} == {color}        # ทึบ + ประ (คาด) สีเดียวกัน
         assert fig.data[-1].marker.line.color == color                               # วงคืนทุน ev
+        fill = next(t for t in fig.data if t.legendgroup == "trend" and t.fill == "tozeroy")
+        r, g, b = (int(color[i:i + 2], 16) for i in (1, 3, 5))
+        assert fill.fillcolor == f"rgba({r},{g},{b},{goal.ZONE_ALPHA * 2})"         # เขียวจางเท่าพื้นแดง
+        assert fill.mode == "none" and fill.showlegend is False and fill.hoverinfo == "skip"
+
+
+def test_the_green_fill_runs_from_t0_to_now_and_only_above_zero():
+    inputs = timed(t0_days=4, fills=[(1, -60.0, 8.0), (3, -100.0, 20.0)], calls=[CALL_C7])
+    s, df = goal.cash_summary([inputs], T_NOW), goal.cash_timeline([inputs], T_NOW)
+    fig = goal.cash_figure(df, s, theme="light")
+    fill = next(t for t in fig.data if t.fill == "tozeroy" and t.legendgroup == "trend")
+    solid = next(t for t in fig.data if t.legendgroup == "trend" and t.showlegend is not False)
+    assert pd.Timestamp(fill.x[0]) == T_NOW - 4 * DAY and pd.Timestamp(fill.x[-1]) == T_NOW   # P₀ → ตอนนี้ (ไม่ใช่อนาคต)
+    assert list(fill.y) == pytest.approx(list(solid.y)) and fill.y[-1] == pytest.approx(20.0)
+    assert fig.data.index(fill) < fig.data.index(solid)                         # พื้นอยู่ใต้เส้น
+    losing = timed(fills=[(1, 0.0, -3.0)], calls=[CALL_C7])                     # Ē < 0 → ไม่มีส่วน > 0 → ไม่มีพื้น
+    lfig = goal.cash_figure(goal.cash_timeline([losing], T_NOW), goal.cash_summary([losing], T_NOW), theme="light")
+    assert not any(t.legendgroup == "trend" and t.fill == "tozeroy" for t in lfig.data)
+
+
+def test_above_zero_clips_below_zero_and_adds_the_crossing():
+    t = [T_NOW, T_NOW + DAY, T_NOW + 2 * DAY, T_NOW + 3 * DAY]
+    xs, ys = goal._above_zero(t, [0.0, 10.0, -10.0, 5.0])
+    assert ys == [0.0, 10.0, 0.0, 0.0, 0.0, 5.0]                               # ตัดที่ 0 ไม่ล้นลงล่าง
+    assert xs == [t[0], t[1], T_NOW + 1.5 * DAY, t[2], T_NOW + (2 + 2 / 3) * DAY, t[3]]
 
 
 def test_the_projection_reaches_the_leaps_expiry_only_when_switched_on():
