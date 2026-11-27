@@ -29,7 +29,8 @@ leaps_shares = 100 × สัญญา · ขา LEAPS เริ่มที่ 0
 กราฟเวลา (Eₙ เทียบต้นทุน option และ Cash Burn) · แกน x = เวลา UTC · ตัวเดียวหรือรวมพอร์ต (ผลรวมทุกตัว) · 4 เส้น:
 
     trend       Eₙ เฉลี่ยต่อวัน     = Σ Ēᵢ · max(0, t − t0ᵢ)   Ēᵢ = Eᵢ(now) / วันตั้งแต่ t0ᵢ (วันปฏิทิน) · ต่อไปอนาคต (ประ)
-                                   สีเขียวเข้ม · สวิตช์ to_expiry (หน้าเว็บเปิดเป็นค่าเริ่มต้น) = ต่อเส้นประจน LEAPS หมดอายุเร็วสุด
+                                   สีเขียวเข้ม · พื้นเขียวจาง t0 → ตอนนี้ เฉพาะส่วนที่ > 0 (คู่กับพื้นแดงของ Cash Burn)
+                                   สวิตช์ to_expiry (หน้าเว็บเปิดเป็นค่าเริ่มต้น) = ต่อเส้นประจน LEAPS หมดอายุเร็วสุด
                                    Eᵢ = Eₙ ของ fill ล่าสุด (finalized_runs ของ bot) · ไม่วาดเส้น Eₙ เอง
     ev_cost     ต้นทุน option (ev) = Σ leaps_shares · (cost − max(0, p0 − K))   ไม่คิด intrinsic ที่ P₀ · เส้นแนวนอนฝั่งบวก
     cash_burn   Cash Burn สะสม    = min(0, min_{s ≤ t} Σ Aᵢ(s))   ติดลบหรือ 0 เท่านั้น ค้างค่าที่ลึกสุด (เส้นแดง)
@@ -50,7 +51,7 @@ import plotly.graph_objects as go
 
 from lego_charts import FONT_FAMILY, LINE, REFERENCE_DASH, theme_tokens
 
-GOAL_SCHEMA = 11                    # 11 = กราฟเวลา: Cash Burn ตอนนี้ = ขั้นบันไดเทาบางมาก ไม่มีจุด (10 = + จุดแดง)
+GOAL_SCHEMA = 12                    # 12 = กราฟเวลา: พื้นเขียวใต้เส้นเฉลี่ย (> 0) · 11 = Cash Burn ตอนนี้ ขั้นบันไดเทาบาง
 PRICE, PCT = "price", "pct"
 ALL = "รวมพอร์ต"
 LINE_KEYS = ("goal", "stock_leg", "leaps_leg", "payoff", "payoff_e")
@@ -727,6 +728,19 @@ def trend_points(summary: dict, times: Iterable) -> tuple[list, list, list, list
     return (past, [trend_value(summary, t) for t in past], future, [trend_value(summary, t) for t in future])
 
 
+def _above_zero(xs: Sequence, ys: Sequence[float]) -> tuple[list, list]:
+    """ส่วนที่ > 0 ของเส้นตรงเป็นท่อน (ต่ำกว่า 0 → 0) · เติมจุดตัดแกน 0 ระหว่างจุด เพื่อให้พื้นไม่ล้นข้ามเส้น"""
+    out_x, out_y = [], []
+    for n, (at, value) in enumerate(zip(xs, ys)):
+        if n and (ys[n - 1] > 0) != (value > 0) and ys[n - 1] != value and 0 not in (ys[n - 1], value):
+            prev = xs[n - 1]
+            out_x.append(prev + (at - prev) * (ys[n - 1] / (ys[n - 1] - value)))
+            out_y.append(0.0)
+        out_x.append(at)
+        out_y.append(max(0.0, float(value)))
+    return out_x, out_y
+
+
 def breakeven_text(summary: dict) -> str:
     """วันคืนทุน ev เป็นข้อความ (ใช้ทั้ง subtitle และสมการ)"""
     status, when, expiry = summary["status"], summary["breakeven"], summary["expiry"]
@@ -746,7 +760,8 @@ def breakeven_text(summary: dict) -> str:
 
 def cash_figure(df: pd.DataFrame, summary: dict, *, theme: str | None = None,
                 title: str | None = None, subtitle: str | None = None, height: int = 520) -> go.Figure:
-    """4 เส้นตามเวลา: Eₙ เฉลี่ยต่อวัน (เขียวเข้ม · ทึบถึงตอนนี้ แล้วประไปอนาคต) · ต้นทุน option ev (แนวนอนฝั่งบวก)
+    """4 เส้นตามเวลา: Eₙ เฉลี่ยต่อวัน (เขียวเข้ม · ทึบถึงตอนนี้ + พื้นเขียวจางส่วนที่ > 0 แล้วประไปอนาคต)
+    · ต้นทุน option ev (แนวนอนฝั่งบวก)
     · Cash Burn สะสม (แดง ขั้นบันได ≤ 0) · Cash Burn ตอนนี้ (ขั้นบันไดเทาบางมาก = min(0, Σ Aₙ(t)))
     · เส้นตั้ง t0 / ตอนนี้ / คืนทุน ev / LEAPS หมดอายุ (เมื่อเปิดสวิตช์ to_expiry)"""
     tok = theme_tokens(theme)
@@ -769,6 +784,11 @@ def cash_figure(df: pd.DataFrame, summary: dict, *, theme: str | None = None,
                                  **style))
 
     if trend:
+        fill_x, fill_y = _above_zero(trend[0], trend[1])          # พื้นเขียว t0 (P₀) → ตอนนี้ เฉพาะส่วนที่ > 0
+        if any(v > 0 for v in fill_y):
+            fig.add_trace(go.Scatter(x=fill_x, y=fill_y, mode="none", fill="tozeroy", legendgroup="trend",
+                                     fillcolor=_rgba(colors["trend"], ZONE_ALPHA * 2), showlegend=False,
+                                     hoverinfo="skip", name=f"{names['trend']} · พื้น"))
         line("trend", trend[0], trend[1], 1, line=dict(color=colors["trend"], width=LINE["excess"] + 0.5))
         if future:
             fig.add_trace(go.Scatter(x=future, y=trend[3], name=f"{names['trend']} · คาด", mode="lines",

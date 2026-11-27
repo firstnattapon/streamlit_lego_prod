@@ -105,7 +105,7 @@ if getattr(_lego_webull_read, "SNAPSHOT_SCHEMA", 0) < 2:
     _lego_webull_read = importlib.reload(_lego_webull_read)
 if getattr(positions, "POSITIONS_SCHEMA", 0) < 2:   # 2 = LegoChain มี fills + t0 (กราฟเวลา)
     positions = importlib.reload(positions)
-if getattr(goal, "GOAL_SCHEMA", 0) < 11:         # 11 = กราฟเวลา + Cash Burn ตอนนี้ (ขั้นบันไดเทาบาง ไม่มีจุด)
+if getattr(goal, "GOAL_SCHEMA", 0) < 12:         # 12 = กราฟเวลา + พื้นเขียวใต้เส้นเฉลี่ย (> 0)
     goal = importlib.reload(goal)
 
 from lego_webull_read import WebullReadError, fetch_account_snapshot, redact

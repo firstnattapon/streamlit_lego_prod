@@ -469,6 +469,31 @@ def test_the_daily_average_line_is_dark_green_in_both_themes():
         trend = [t for t in fig.data if t.legendgroup == "trend" and t.mode == "lines"]
         assert len(trend) == 2 and {t.line.color for t in trend} == {color}        # ทึบ + ประ (คาด) สีเดียวกัน
         assert fig.data[-1].marker.line.color == color                               # วงคืนทุน ev
+        fill = next(t for t in fig.data if t.legendgroup == "trend" and t.fill == "tozeroy")
+        r, g, b = (int(color[i:i + 2], 16) for i in (1, 3, 5))
+        assert fill.fillcolor == f"rgba({r},{g},{b},{goal.ZONE_ALPHA * 2})"         # เขียวจางเท่าพื้นแดง
+        assert fill.mode == "none" and fill.showlegend is False and fill.hoverinfo == "skip"
+
+
+def test_the_green_fill_runs_from_t0_to_now_and_only_above_zero():
+    inputs = timed(t0_days=4, fills=[(1, -60.0, 8.0), (3, -100.0, 20.0)], calls=[CALL_C7])
+    s, df = goal.cash_summary([inputs], T_NOW), goal.cash_timeline([inputs], T_NOW)
+    fig = goal.cash_figure(df, s, theme="light")
+    fill = next(t for t in fig.data if t.fill == "tozeroy" and t.legendgroup == "trend")
+    solid = next(t for t in fig.data if t.legendgroup == "trend" and t.showlegend is not False)
+    assert pd.Timestamp(fill.x[0]) == T_NOW - 4 * DAY and pd.Timestamp(fill.x[-1]) == T_NOW   # P₀ → ตอนนี้ (ไม่ใช่อนาคต)
+    assert list(fill.y) == pytest.approx(list(solid.y)) and fill.y[-1] == pytest.approx(20.0)
+    assert fig.data.index(fill) < fig.data.index(solid)                         # พื้นอยู่ใต้เส้น
+    losing = timed(fills=[(1, 0.0, -3.0)], calls=[CALL_C7])                     # Ē < 0 → ไม่มีส่วน > 0 → ไม่มีพื้น
+    lfig = goal.cash_figure(goal.cash_timeline([losing], T_NOW), goal.cash_summary([losing], T_NOW), theme="light")
+    assert not any(t.legendgroup == "trend" and t.fill == "tozeroy" for t in lfig.data)
+
+
+def test_above_zero_clips_below_zero_and_adds_the_crossing():
+    t = [T_NOW, T_NOW + DAY, T_NOW + 2 * DAY, T_NOW + 3 * DAY]
+    xs, ys = goal._above_zero(t, [0.0, 10.0, -10.0, 5.0])
+    assert ys == [0.0, 10.0, 0.0, 0.0, 0.0, 5.0]                               # ตัดที่ 0 ไม่ล้นลงล่าง
+    assert xs == [t[0], t[1], T_NOW + 1.5 * DAY, t[2], T_NOW + (2 + 2 / 3) * DAY, t[3]]
 
 
 def test_the_projection_reaches_the_leaps_expiry_only_when_switched_on():
