@@ -105,7 +105,7 @@ if getattr(_lego_webull_read, "SNAPSHOT_SCHEMA", 0) < 2:
     _lego_webull_read = importlib.reload(_lego_webull_read)
 if getattr(positions, "POSITIONS_SCHEMA", 0) < 2:   # 2 = LegoChain มี fills + t0 (กราฟเวลา)
     positions = importlib.reload(positions)
-if getattr(goal, "GOAL_SCHEMA", 0) < 6:          # 6 = กราฟเวลา + สวิตช์ต่อเส้นเฉลี่ยจน LEAPS หมดอายุ
+if getattr(goal, "GOAL_SCHEMA", 0) < 10:         # 10 = กราฟเวลา + Cash Burn ตอนนี้ (ขั้นบันไดเทาบาง + จุดแดง)
     goal = importlib.reload(goal)
 
 from lego_webull_read import WebullReadError, fetch_account_snapshot, redact
@@ -737,7 +737,8 @@ GOAL_CASH_NOTE = ("Eₙ และ Aₙ = ค่าที่ bot บันทึ�
                   "เส้นเฉลี่ยผ่าน Eₙ ตอนนี้ = การ์ด Eₙ สะสม (bot) (แท็บ Live ปรับ genesis baseline จึงอาจต่างเล็กน้อย) · "
                   "t0 = เวลาแถวแรกของ chain (ราคา P₀) · ค่าเฉลี่ยใช้วันปฏิทิน (รวมวันตลาดปิด) · "
                   "ต้นทุน ev ใช้ cost_price ของ LEAPS ใน Webull ลบ intrinsic ที่ P₀ · Cash Burn ติดลบเท่านั้น "
-                  "และค้างค่าที่ลึกที่สุด (รวมพอร์ต = รวม Aₙ ทุกตัวก่อน)")
+                  "และค้างค่าที่ลึกที่สุด (รวมพอร์ต = รวม Aₙ ทุกตัวก่อน) · ขั้นบันไดเทาบาง + จุดแดง = Cash Burn ตอนนี้ "
+                  "min(0, Σ Aₙ) ณ แต่ละเวลา (ไม่ค้างค่าลึกสุด)")
 CHAIN_START_TTL_S = 3600                         # t0 ของ chain ไม่เปลี่ยน — อ่าน webull_lego_rows ทั้ง node ชั่วโมงละครั้ง
 _RUN_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 
@@ -936,7 +937,8 @@ def _goal_cash_chart(picked: list, combined: bool, now, theme) -> dict | None:
     subtitle = (f"Eₙ {_signed(summary['excess'])} · เฉลี่ย "
                 + ("—" if per_day is None else f"{per_day:+,.2f} USD/วัน ใน {summary['days']:,.1f} วันตั้งแต่ t0")
                 + f" · ต้นทุน ev {_signed(summary['ev_cost'])} · คืนทุน ev: {goal.breakeven_text(summary)}"
-                + f" · Cash Burn {_signed(summary['cash_burn'])}")
+                + f" · Cash Burn {_signed(summary['cash_burn'])}"
+                + f" · Cash Burn ตอนนี้ {_signed(summary['cash_burn_now'])}")
     if summary["to_expiry"]:
         subtitle += (f" · เฉลี่ย ณ LEAPS หมดอายุ {summary['expiry']:%Y-%m-%d}: "
                      f"{_signed(goal.trend_value(summary, summary['expiry']))}")
