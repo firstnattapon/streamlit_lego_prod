@@ -438,15 +438,18 @@ def test_the_cash_figure_has_four_lines_without_the_en_line():
     df = goal.cash_timeline([inputs], T_NOW)
     fig = goal.cash_figure(df, s, theme="light", title="t")
     named = {t.name: t for t in fig.data if t.showlegend is not False}
-    assert list(named) == ["Eₙ เฉลี่ย 5.00 USD/วัน (ตั้งแต่ t0 P₀)",              # ไม่มีเส้น Eₙ ขั้นบันไดแล้ว
+    assert sorted(named, key=lambda n: named[n].legendrank) == [                     # ลำดับใน legend
+                           "Eₙ เฉลี่ย 5.00 USD/วัน (ตั้งแต่ t0 P₀)",              # ไม่มีเส้น Eₙ ขั้นบันไดแล้ว
                            "ต้นทุน option (ev ไม่คิด intrinsic)", "Cash Burn สะสม (Aₙ ต่ำสุด, ≤ 0)",
                            "Cash Burn ตอนนี้ (Aₙ ณ เวลานั้น, ≤ 0)"]
     assert np.allclose(named["ต้นทุน option (ev ไม่คิด intrinsic)"].y, 190.0)       # แนวนอนฝั่งบวก
     burn = named["Cash Burn สะสม (Aₙ ต่ำสุด, ≤ 0)"]
     assert max(burn.y) <= 0 and list(burn.y) == [0, -60, -150, -150, -150] and burn.line.shape == "hv"
-    dots = named["Cash Burn ตอนนี้ (Aₙ ณ เวลานั้น, ≤ 0)"]                         # จุดสีแดงล้วน ไม่มีเส้น
+    dots = named["Cash Burn ตอนนี้ (Aₙ ณ เวลานั้น, ≤ 0)"]                         # ขั้นบันไดเทาบางมาก + จุดแดง
     assert list(dots.y) == [0, -60, -150, -100, -100] and list(dots.x) == list(burn.x)
-    assert dots.mode == "markers" and dots.marker.color == "#d03b3b" and dots.fill is None
+    assert dots.mode == "lines+markers" and dots.marker.color == "#d03b3b" and dots.fill is None
+    assert dots.line.shape == "hv" and dots.line.color == "#52514e" and dots.line.width <= 1 and dots.line.dash is None
+    assert fig.data.index(dots) < fig.data.index(burn)                          # เส้นเทาอยู่ใต้เส้นแดง
     projected = next(t for t in fig.data if t.name.endswith("· คาด"))
     assert projected.line.dash == "dash" and projected.y[-1] == pytest.approx(190.0)
     texts = [a.text for a in fig.layout.annotations]
