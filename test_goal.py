@@ -445,11 +445,12 @@ def test_the_cash_figure_has_four_lines_without_the_en_line():
     assert np.allclose(named["ต้นทุน option (ev ไม่คิด intrinsic)"].y, 190.0)       # แนวนอนฝั่งบวก
     burn = named["Cash Burn สะสม (Aₙ ต่ำสุด, ≤ 0)"]
     assert max(burn.y) <= 0 and list(burn.y) == [0, -60, -150, -150, -150] and burn.line.shape == "hv"
-    dots = named["Cash Burn ตอนนี้ (Aₙ ณ เวลานั้น, ≤ 0)"]                         # ขั้นบันไดเทาบางมาก + จุดแดง
-    assert list(dots.y) == [0, -60, -150, -100, -100] and list(dots.x) == list(burn.x)
-    assert dots.mode == "lines+markers" and dots.marker.color == "#d03b3b" and dots.fill is None
-    assert dots.line.shape == "hv" and dots.line.color == "#52514e" and dots.line.width <= 1 and dots.line.dash is None
-    assert fig.data.index(dots) < fig.data.index(burn)                          # เส้นเทาอยู่ใต้เส้นแดง
+    now_line = named["Cash Burn ตอนนี้ (Aₙ ณ เวลานั้น, ≤ 0)"]                     # ขั้นบันไดเทาบางมาก ไม่มีจุด
+    assert list(now_line.y) == [0, -60, -150, -100, -100] and list(now_line.x) == list(burn.x)
+    assert now_line.mode == "lines" and now_line.marker.color is None and now_line.fill is None
+    assert now_line.line.shape == "hv" and now_line.line.color == "#52514e"
+    assert now_line.line.width <= 1 and now_line.line.dash is None
+    assert fig.data.index(now_line) < fig.data.index(burn)                      # เส้นเทาอยู่ใต้เส้นแดง
     projected = next(t for t in fig.data if t.name.endswith("· คาด"))
     assert projected.line.dash == "dash" and projected.y[-1] == pytest.approx(190.0)
     texts = [a.text for a in fig.layout.annotations]
