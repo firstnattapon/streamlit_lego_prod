@@ -363,6 +363,10 @@ def test_cash_burn_holds_the_deepest_negative_actual():
     up = goal.cash_timeline([timed(fills=[(1, 300.0, 1.0), (2, -50.0, 2.0)])], T_NOW)
     assert up["cash_burn"].tolist() == [0, 0, -50, -50]                                   # Aₙ บวก → 0 (ไม่เกิน 0)
     assert up["cash_burn_now"].tolist() == [0, 0, -50, -50]
+    daily = goal.daily_burn(df)                                     # fill ทุก 12 ชม. → รายวันโชว์แค่ค่าปิดวัน
+    assert daily["cash_burn_now"].tolist() == [0, 0, -400, -1200, -500, -500]
+    assert [t.hour for t in daily[goal.TIME]] == [15, 0, 0, 0, 0, 15]          # t0 · 00:00 UTC × 4 · ตอนนี้
+    assert goal.daily_burn(df.iloc[:0]).empty
     back = goal.cash_summary([timed(fills=[(1, -50.0, 1.0), (2, 300.0, 2.0)])], T_NOW)
     assert (back["cash_burn"], back["cash_burn_now"]) == (-50.0, 0.0)                    # Aₙ ล่าสุดบวก → 0
 
@@ -441,16 +445,22 @@ def test_the_cash_figure_has_four_lines_without_the_en_line():
     assert sorted(named, key=lambda n: named[n].legendrank) == [                     # ลำดับใน legend
                            "Eₙ เฉลี่ย 5.00 USD/วัน (ตั้งแต่ t0 P₀)",              # ไม่มีเส้น Eₙ ขั้นบันไดแล้ว
                            "ต้นทุน option (ev ไม่คิด intrinsic)", "Cash Burn สะสม (Aₙ ต่ำสุด, ≤ 0)",
-                           "Cash Burn ตอนนี้ (Aₙ ณ เวลานั้น, ≤ 0)"]
+                           "Cash Burn ตอนนี้ รายวัน (Aₙ ปิดวัน UTC, ≤ 0)"]
     assert np.allclose(named["ต้นทุน option (ev ไม่คิด intrinsic)"].y, 190.0)       # แนวนอนฝั่งบวก
     burn = named["Cash Burn สะสม (Aₙ ต่ำสุด, ≤ 0)"]
     assert max(burn.y) <= 0 and list(burn.y) == [0, -60, -150, -150, -150] and burn.line.shape == "hv"
-    now_line = named["Cash Burn ตอนนี้ (Aₙ ณ เวลานั้น, ≤ 0)"]                     # ขั้นบันไดเทาบางมาก ไม่มีจุด
-    assert list(now_line.y) == [0, -60, -150, -100, -100] and list(now_line.x) == list(burn.x)
-    assert now_line.mode == "lines" and now_line.marker.color is None and now_line.fill is None
+    now_line = named["Cash Burn ตอนนี้ รายวัน (Aₙ ปิดวัน UTC, ≤ 0)"]               # ขั้นเทาบาง + จุดแดง วันละ 1
+    day = (lambda d: pd.Timestamp(f"2026-11-{d}", tz="UTC"))
+    assert [goal._utc(t) for t in now_line.x] == [T_NOW - 4 * DAY, day(14), day(15), day(16), day(17), T_NOW]
+    assert list(now_line.y) == [0, 0, -60, -150, -100, -100]                    # ค่า ณ 00:00 = ปิดวันก่อนหน้า
+    assert now_line.mode == "lines+markers" and now_line.marker.color == "#d03b3b" and now_line.fill is None
+    assert list(now_line.marker.size) == [0, 5, 5, 5, 5, 5]                     # ไม่มีจุดที่ t0 · วันละ 1 จุด + ตอนนี้
     assert now_line.line.shape == "hv" and now_line.line.color == "#52514e"
     assert now_line.line.width <= 1 and now_line.line.dash is None
     assert fig.data.index(now_line) < fig.data.index(burn)                      # เส้นเทาอยู่ใต้เส้นแดง
+    top = next(t for t in fig.data if t.legendgroup == "burn_now" and t.mode == "markers")
+    assert fig.data.index(top) > fig.data.index(burn) and top.hoverinfo == "skip"   # จุดแดงซ้ำไว้บนเส้นแดง
+    assert list(top.y) == list(now_line.y) and list(top.marker.size) == list(now_line.marker.size)
     projected = next(t for t in fig.data if t.name.endswith("· คาด"))
     assert projected.line.dash == "dash" and projected.y[-1] == pytest.approx(190.0)
     texts = [a.text for a in fig.layout.annotations]
