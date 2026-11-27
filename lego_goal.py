@@ -35,7 +35,7 @@ leaps_shares = 100 × สัญญา · ขา LEAPS เริ่มที่ 0
     ev_cost     ต้นทุน option (ev) = Σ leaps_shares · (cost − max(0, p0 − K))   ไม่คิด intrinsic ที่ P₀ · เส้นแนวนอนฝั่งบวก
     cash_burn   Cash Burn สะสม    = min(0, min_{s ≤ t} Σ Aᵢ(s))   ติดลบหรือ 0 เท่านั้น ค้างค่าที่ลึกสุด (เส้นแดง)
     cash_burn_now Cash Burn ตอนนี้ = min(0, Σ Aᵢ(t))              ไม่ค้างค่าลึกสุด · วาดรายวัน (daily_burn): ค่า ณ 00:00 UTC
-                                   (= ปิดวันก่อนหน้า) · ขั้นบันไดเทาบางมาก 1 วัน 1 ขั้น + จุดแดง 1 วัน 1 จุด · จุดสุดท้าย = ตอนนี้
+                                   (= ปิดวันก่อนหน้า) · ขั้นบันไดเทาบางมาก 1 วัน 1 ขั้น + จุดแดงทุกครั้งที่ขั้นเปลี่ยน · ปลาย = ตอนนี้
 
 t0ᵢ = เวลาแถวแรกของ chain (P₀) · ไม่มี → เวลา fill แรก · คืนทุน ev ที่ t* = now + (ev_cost − E(now)) / ΣĒᵢ วัน
 """
@@ -52,7 +52,7 @@ import plotly.graph_objects as go
 
 from lego_charts import FONT_FAMILY, LINE, REFERENCE_DASH, theme_tokens
 
-GOAL_SCHEMA = 13                    # 13 = Cash Burn ตอนนี้ รายวัน (ขั้นเทาบาง + จุดแดง วันละ 1) · 12 = พื้นเขียวใต้เส้นเฉลี่ย
+GOAL_SCHEMA = 14                    # 14 = Cash Burn ตอนนี้ รายวัน: จุดแดงเฉพาะเมื่อขั้นเปลี่ยน (13 = จุดแดงวันละ 1)
 PRICE, PCT = "price", "pct"
 ALL = "รวมพอร์ต"
 LINE_KEYS = ("goal", "stock_leg", "leaps_leg", "payoff", "payoff_e")
@@ -570,7 +570,7 @@ PROJECT_POINTS = 61
 EXPIRY_ZONE, EXPIRY_HOUR = "America/New_York", 16
 CASH_KEYS = ("trend", "ev_cost", "cash_burn", "burn_now")
 CASH_SHORT = {"trend": "เฉลี่ย", "ev_cost": "ต้นทุน ev", "cash_burn": "Cash Burn", "burn_now": "Burn ตอนนี้"}
-BURN_NOW_WIDTH, BURN_NOW_SIZE = 0.75, 5   # Cash Burn ตอนนี้ รายวัน: ขั้นบันไดเทาบางมาก + จุดแดง วันละ 1 · อยู่ใต้เส้นแดง
+BURN_NOW_WIDTH, BURN_NOW_SIZE = 0.75, 5   # Cash Burn ตอนนี้ รายวัน: ขั้นเทาบางมาก (ใต้เส้นแดง) + จุดแดงเมื่อขั้นเปลี่ยน
 MARK_CHAR, MARK_ROW = 0.008, 16      # ป้ายเส้นตั้ง: ความกว้างโดยประมาณต่อตัวอักษร (สัดส่วนแกน x) · ระยะเลื่อนลงต่อแถว (px)
 TREND_GREEN = {"light": "#006400", "dark": "#1b7a34"}   # เส้น Eₙ เฉลี่ย = เขียวเข้ม · คอนทราสต์กับพื้น ≥ 3:1 ทั้งสองธีม
 CASH_CONFIG = dict(CHART_CONFIG, toImageButtonOptions=dict(CHART_CONFIG["toImageButtonOptions"], filename="goal_cash"))
@@ -622,7 +622,7 @@ def cash_timeline(items: Sequence[GoalInputs], now) -> pd.DataFrame:
 
 
 def daily_burn(df: pd.DataFrame) -> pd.DataFrame:
-    """Cash Burn ตอนนี้ รายวัน (1 วัน 1 ขั้น 1 จุด): เวลา = จุดเริ่ม (t0) · ทุก 00:00 UTC หลังจุดเริ่ม (= ปิดวันก่อนหน้า)
+    """Cash Burn ตอนนี้ รายวัน (1 วัน 1 ขั้น): เวลา = จุดเริ่ม (t0) · ทุก 00:00 UTC หลังจุดเริ่ม (= ปิดวันก่อนหน้า)
     · จุดสุดท้าย (ตอนนี้) · ค่า = cash_burn_now ล่าสุดที่ ≤ เวลานั้น (ค่าระหว่างวันที่ไม่ใช่ปิดวันไม่โชว์)"""
     if df.empty:
         return pd.DataFrame(columns=[TIME, "cash_burn_now"])
@@ -631,6 +631,13 @@ def daily_burn(df: pd.DataFrame) -> pd.DataFrame:
     grid = sorted({start, *pd.date_range(start.floor("D") + DAY, end, freq="D"), end})
     values = pd.Series(df["cash_burn_now"].to_numpy(dtype=float), index=times).reindex(grid, method="ffill")
     return pd.DataFrame({TIME: grid, "cash_burn_now": values.to_numpy()})
+
+
+def step_changes(daily: pd.DataFrame) -> pd.DataFrame:
+    """จุดที่ขั้นรายวันเปลี่ยนค่า (ต่างจากจุดก่อนหน้า > 0.005 USD) → จุดแดง · จุดแรก (t0) ไม่นับ"""
+    values = daily["cash_burn_now"].astype(float)
+    changed = (values.diff().abs() > 0.005).to_numpy()            # diff ของจุดแรก = NaN → False
+    return daily.loc[changed, [TIME, "cash_burn_now"]].reset_index(drop=True)
 
 
 @dataclass(frozen=True)
@@ -775,7 +782,8 @@ def cash_figure(df: pd.DataFrame, summary: dict, *, theme: str | None = None,
                 title: str | None = None, subtitle: str | None = None, height: int = 520) -> go.Figure:
     """4 เส้นตามเวลา: Eₙ เฉลี่ยต่อวัน (เขียวเข้ม · ทึบถึงตอนนี้ + พื้นเขียวจางส่วนที่ > 0 แล้วประไปอนาคต)
     · ต้นทุน option ev (แนวนอนฝั่งบวก)
-    · Cash Burn สะสม (แดง ขั้นบันได ≤ 0) · Cash Burn ตอนนี้ รายวัน (ขั้นบันไดเทาบางมาก + จุดแดง วันละ 1 = min(0, Σ Aₙ) ปิดวัน UTC)
+    · Cash Burn สะสม (แดง ขั้นบันได ≤ 0) · Cash Burn ตอนนี้ รายวัน (ขั้นบันไดเทาบางมาก = min(0, Σ Aₙ) ปิดวัน UTC
+    + จุดแดงทุกครั้งที่ขั้นเปลี่ยน)
     · เส้นตั้ง t0 / ตอนนี้ / คืนทุน ev / LEAPS หมดอายุ (เมื่อเปิดสวิตช์ to_expiry)"""
     tok = theme_tokens(theme)
     colors = {"trend": TREND_GREEN["dark" if theme == "dark" else "light"], "ev_cost": tok["text_secondary"],
@@ -813,18 +821,18 @@ def cash_figure(df: pd.DataFrame, summary: dict, *, theme: str | None = None,
         line("ev_cost", grid, [ev] * len(grid), 2,
              line=dict(color=colors["ev_cost"], width=LINE["reference"] + 1.0, dash=REFERENCE_DASH))
     burn_now = summary.get("cash_burn_now")
-    daily = daily_burn(df) if "cash_burn_now" in df else None      # 1 วัน 1 ขั้น 1 จุดแดง
+    daily = daily_burn(df) if "cash_burn_now" in df else None      # ขั้นเทา 1 วัน 1 ขั้น
     if daily is not None:                    # เส้นเทาวาดก่อนเส้นแดง → ช่วงที่ทับกัน เส้นแดงอยู่บน
-        sizes = [0 if n == 0 and len(daily) > 1 else BURN_NOW_SIZE for n in range(len(daily))]   # t0 ไม่ใช่ปิดวัน
-        marker = dict(color=STATUS["critical"], size=sizes, line=dict(width=0))   # จุดแดงทึบ (ไม่มีขอบ)
-        line("burn_now", daily[TIME], daily["cash_burn_now"], 4, mode="lines+markers",
-             line=dict(color=colors["burn_now"], width=BURN_NOW_WIDTH, shape="hv"), marker=marker)
+        line("burn_now", daily[TIME], daily["cash_burn_now"], 4,
+             line=dict(color=colors["burn_now"], width=BURN_NOW_WIDTH, shape="hv"))
     line("cash_burn", x, df["cash_burn"], 3, fill="tozeroy", fillcolor=_rgba(colors["cash_burn"], ZONE_ALPHA * 2),
          line=dict(color=colors["cash_burn"], width=LINE["total"], shape="hv"))
-    if daily is not None:                    # จุดแดงซ้ำไว้บนสุด (ไม่โดนเส้น/พื้นแดงทับจนสีหม่น) · hover อยู่ที่ trace หลัก
-        fig.add_trace(go.Scatter(x=daily[TIME], y=daily["cash_burn_now"], mode="markers", marker=marker,
+    changes = step_changes(daily) if daily is not None else None
+    if changes is not None and not changes.empty:   # จุดแดงทุกครั้งที่ขั้นเปลี่ยน · วาดบนสุด (ไม่โดนเส้น/พื้นแดงทับ)
+        fig.add_trace(go.Scatter(x=changes[TIME], y=changes["cash_burn_now"], mode="markers",
+                                 marker=dict(color=STATUS["critical"], size=BURN_NOW_SIZE, line=dict(width=0)),
                                  legendgroup="burn_now", showlegend=False, hoverinfo="skip",
-                                 name=f"{names['burn_now']} · จุด"))
+                                 name=f"{names['burn_now']} · จุดเปลี่ยน"))
 
     values = [0.0, *df["cash_burn"], *(trend[1] + trend[3] if trend else []),
               *([ev] if ev is not None else [])]
@@ -902,7 +910,7 @@ def cash_equation_text(items: Sequence[GoalInputs], summary: dict) -> str:
         "  ev_cost      = Σ leaps_shares · (cost − max(0, p0 − K))   (ไม่คิด intrinsic ที่ P₀)",
         "  cash_burn(t) = min(0, min_{s ≤ t} Σ Aₙ(s))",
         "  cash_burn_now(t) = min(0, Σ Aₙ(t))   (ไม่ค้างค่าลึกสุด · ค่าตอนนี้ = ที่ now)",
-        "                  กราฟ: รายวัน ณ 00:00 UTC (= ปิดวันก่อนหน้า) + ตอนนี้ → ขั้นเทาบาง 1 วัน 1 ขั้น · จุดแดง 1 วัน 1 จุด",
+        "                  กราฟ: รายวัน ณ 00:00 UTC (= ปิดวันก่อนหน้า) + ตอนนี้ → ขั้นเทาบาง 1 วัน 1 ขั้น · จุดแดงเมื่อขั้นเปลี่ยน",
         "",
         *rows,
         f"  {'รวม':<{width}}  Eₙ {_fmt(summary['excess'])} · Ē {_fmt(summary['per_day'])} USD/วัน · "
