@@ -36,6 +36,7 @@ leaps_shares = 100 × สัญญา · ขา LEAPS เริ่มที่ 0
     cash_burn   Cash Burn สะสม    = min(0, min_{s ≤ t} Σ Aᵢ(s))   ติดลบหรือ 0 เท่านั้น ค้างค่าที่ลึกสุด (เส้นแดง)
     cash_burn_now Cash Burn ตอนนี้ = min(0, Σ Aᵢ(t))              ไม่ค้างค่าลึกสุด · วาดรายวัน (daily_burn): ค่า ณ 00:00 UTC
                                    (= ปิดวันก่อนหน้า) · ขั้นบันไดเทาบางมาก 1 วัน 1 ขั้น + จุดแดงทุกครั้งที่ขั้นเปลี่ยน · ปลาย = ตอนนี้
+                                   ค่าเริ่มต้นปิด (คลิก legend เพื่อเปิด) · ไม่มีป้ายปลายกราฟ (ค่าตอนนี้อยู่ใน subtitle)
 
 t0ᵢ = เวลาแถวแรกของ chain (P₀) · ไม่มี → เวลา fill แรก · คืนทุน ev ที่ t* = now + (ev_cost − E(now)) / ΣĒᵢ วัน
 """
@@ -52,7 +53,7 @@ import plotly.graph_objects as go
 
 from lego_charts import FONT_FAMILY, LINE, REFERENCE_DASH, theme_tokens
 
-GOAL_SCHEMA = 14                    # 14 = Cash Burn ตอนนี้ รายวัน: จุดแดงเฉพาะเมื่อขั้นเปลี่ยน (13 = จุดแดงวันละ 1)
+GOAL_SCHEMA = 15                    # 15 = Cash Burn ตอนนี้ ค่าเริ่มต้นปิด (legendonly) · 14 = จุดแดงเฉพาะเมื่อขั้นเปลี่ยน
 PRICE, PCT = "price", "pct"
 ALL = "รวมพอร์ต"
 LINE_KEYS = ("goal", "stock_leg", "leaps_leg", "payoff", "payoff_e")
@@ -569,8 +570,9 @@ COVERED_LEAD = 0.25                      # ไม่มีจุดให้ช�
 PROJECT_POINTS = 61
 EXPIRY_ZONE, EXPIRY_HOUR = "America/New_York", 16
 CASH_KEYS = ("trend", "ev_cost", "cash_burn", "burn_now")
-CASH_SHORT = {"trend": "เฉลี่ย", "ev_cost": "ต้นทุน ev", "cash_burn": "Cash Burn", "burn_now": "Burn ตอนนี้"}
+CASH_SHORT = {"trend": "เฉลี่ย", "ev_cost": "ต้นทุน ev", "cash_burn": "Cash Burn"}   # ป้ายปลายกราฟ
 BURN_NOW_WIDTH, BURN_NOW_SIZE = 0.75, 5   # Cash Burn ตอนนี้ รายวัน: ขั้นเทาบางมาก (ใต้เส้นแดง) + จุดแดงเมื่อขั้นเปลี่ยน
+                                          # ค่าเริ่มต้นปิด (legendonly) · คลิก legend เปิดทั้งเส้นและจุด
 MARK_CHAR, MARK_ROW = 0.008, 16      # ป้ายเส้นตั้ง: ความกว้างโดยประมาณต่อตัวอักษร (สัดส่วนแกน x) · ระยะเลื่อนลงต่อแถว (px)
 TREND_GREEN = {"light": "#006400", "dark": "#1b7a34"}   # เส้น Eₙ เฉลี่ย = เขียวเข้ม · คอนทราสต์กับพื้น ≥ 3:1 ทั้งสองธีม
 CASH_CONFIG = dict(CHART_CONFIG, toImageButtonOptions=dict(CHART_CONFIG["toImageButtonOptions"], filename="goal_cash"))
@@ -783,7 +785,7 @@ def cash_figure(df: pd.DataFrame, summary: dict, *, theme: str | None = None,
     """4 เส้นตามเวลา: Eₙ เฉลี่ยต่อวัน (เขียวเข้ม · ทึบถึงตอนนี้ + พื้นเขียวจางส่วนที่ > 0 แล้วประไปอนาคต)
     · ต้นทุน option ev (แนวนอนฝั่งบวก)
     · Cash Burn สะสม (แดง ขั้นบันได ≤ 0) · Cash Burn ตอนนี้ รายวัน (ขั้นบันไดเทาบางมาก = min(0, Σ Aₙ) ปิดวัน UTC
-    + จุดแดงทุกครั้งที่ขั้นเปลี่ยน)
+    + จุดแดงทุกครั้งที่ขั้นเปลี่ยน · ค่าเริ่มต้นปิด คลิก legend เพื่อเปิด)
     · เส้นตั้ง t0 / ตอนนี้ / คืนทุน ev / LEAPS หมดอายุ (เมื่อเปิดสวิตช์ to_expiry)"""
     tok = theme_tokens(theme)
     colors = {"trend": TREND_GREEN["dark" if theme == "dark" else "light"], "ev_cost": tok["text_secondary"],
@@ -820,10 +822,9 @@ def cash_figure(df: pd.DataFrame, summary: dict, *, theme: str | None = None,
     if ev is not None:
         line("ev_cost", grid, [ev] * len(grid), 2,
              line=dict(color=colors["ev_cost"], width=LINE["reference"] + 1.0, dash=REFERENCE_DASH))
-    burn_now = summary.get("cash_burn_now")
     daily = daily_burn(df) if "cash_burn_now" in df else None      # ขั้นเทา 1 วัน 1 ขั้น
-    if daily is not None:                    # เส้นเทาวาดก่อนเส้นแดง → ช่วงที่ทับกัน เส้นแดงอยู่บน
-        line("burn_now", daily[TIME], daily["cash_burn_now"], 4,
+    if daily is not None:                    # เส้นเทาวาดก่อนเส้นแดง → ช่วงที่ทับกัน เส้นแดงอยู่บน · ค่าเริ่มต้นปิด
+        line("burn_now", daily[TIME], daily["cash_burn_now"], 4, visible="legendonly",
              line=dict(color=colors["burn_now"], width=BURN_NOW_WIDTH, shape="hv"))
     line("cash_burn", x, df["cash_burn"], 3, fill="tozeroy", fillcolor=_rgba(colors["cash_burn"], ZONE_ALPHA * 2),
          line=dict(color=colors["cash_burn"], width=LINE["total"], shape="hv"))
@@ -832,7 +833,7 @@ def cash_figure(df: pd.DataFrame, summary: dict, *, theme: str | None = None,
         fig.add_trace(go.Scatter(x=changes[TIME], y=changes["cash_burn_now"], mode="markers",
                                  marker=dict(color=STATUS["critical"], size=BURN_NOW_SIZE, line=dict(width=0)),
                                  legendgroup="burn_now", showlegend=False, hoverinfo="skip",
-                                 name=f"{names['burn_now']} · จุดเปลี่ยน"))
+                                 visible="legendonly", name=f"{names['burn_now']} · จุดเปลี่ยน"))   # เปิดพร้อมเส้นเทา
 
     values = [0.0, *df["cash_burn"], *(trend[1] + trend[3] if trend else []),
               *([ev] if ev is not None else [])]
@@ -881,8 +882,7 @@ def cash_figure(df: pd.DataFrame, summary: dict, *, theme: str | None = None,
         ends.append(("trend", trend_value(summary, x_end)))
     if ev is not None:
         ends.append(("ev_cost", ev))
-    ends.append(("cash_burn", summary["cash_burn"]))
-    ends.append(("burn_now", burn_now))
+    ends.append(("cash_burn", summary["cash_burn"]))     # Cash Burn ตอนนี้ ค่าเริ่มต้นปิด → ไม่มีป้ายปลายกราฟ (ค่าอยู่ใน subtitle)
     ends =[(k, v) for k, v in ends if v is not None]
     for (key, value), y in zip(ends, _spread([v for _, v in ends], (y_range[1] - y_range[0]) * 0.06)):
         fig.add_annotation(x=x_end, y=y, text=f"{CASH_SHORT[key]} <b>{value:+,.0f}</b>", showarrow=False,
