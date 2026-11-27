@@ -357,10 +357,12 @@ def test_cash_burn_holds_the_deepest_negative_actual():
     df = goal.cash_timeline([timed(fills=[(0.5 * (n + 1), a, 1.0) for n, a in enumerate(actual)])], T_NOW)
     assert df["actual"].tolist() == [0, -500, -400, -300, -1200, -500, -500]            # + จุดตอนนี้
     assert df["cash_burn"].tolist() == [0, -500, -500, -500, -1200, -1200, -1200]
+    assert df["cash_burn_now"].tolist() == [0, -500, -400, -300, -1200, -500, -500]     # ไม่ค้างค่าลึกสุด
     s = goal.cash_summary([timed(fills=[(0.5 * (n + 1), a, 1.0) for n, a in enumerate(actual)])], T_NOW)
     assert (s["cash_burn"], s["cash_burn_now"]) == (-1200.0, -500.0)                     # ลึกสุด · ตอนนี้ (Aₙ ล่าสุด)
     up = goal.cash_timeline([timed(fills=[(1, 300.0, 1.0), (2, -50.0, 2.0)])], T_NOW)
     assert up["cash_burn"].tolist() == [0, 0, -50, -50]                                   # Aₙ บวก → 0 (ไม่เกิน 0)
+    assert up["cash_burn_now"].tolist() == [0, 0, -50, -50]
     back = goal.cash_summary([timed(fills=[(1, -50.0, 1.0), (2, 300.0, 2.0)])], T_NOW)
     assert (back["cash_burn"], back["cash_burn_now"]) == (-50.0, 0.0)                    # Aₙ ล่าสุดบวก → 0
 
@@ -438,14 +440,14 @@ def test_the_cash_figure_has_four_lines_without_the_en_line():
     named = {t.name: t for t in fig.data if t.showlegend is not False}
     assert list(named) == ["Eₙ เฉลี่ย 5.00 USD/วัน (ตั้งแต่ t0 P₀)",              # ไม่มีเส้น Eₙ ขั้นบันไดแล้ว
                            "ต้นทุน option (ev ไม่คิด intrinsic)", "Cash Burn สะสม (Aₙ ต่ำสุด, ≤ 0)",
-                           "Cash Burn ตอนนี้ (Aₙ ล่าสุด, ≤ 0)"]
+                           "Cash Burn ตอนนี้ (Aₙ ณ เวลานั้น, ≤ 0)"]
     assert np.allclose(named["ต้นทุน option (ev ไม่คิด intrinsic)"].y, 190.0)       # แนวนอนฝั่งบวก
     burn = named["Cash Burn สะสม (Aₙ ต่ำสุด, ≤ 0)"]
     assert max(burn.y) <= 0 and list(burn.y) == [0, -60, -150, -150, -150] and burn.line.shape == "hv"
-    now_line = named["Cash Burn ตอนนี้ (Aₙ ล่าสุด, ≤ 0)"]                         # แนวนอน เทา บางมาก ทึบ
-    assert np.allclose(now_line.y, -100.0) and len(now_line.y) == len(named["ต้นทุน option (ev ไม่คิด intrinsic)"].y)
-    assert now_line.line.width <= 1 and now_line.line.color == "#52514e" and now_line.line.dash is None
-    assert now_line.fill is None
+    now_line = named["Cash Burn ตอนนี้ (Aₙ ณ เวลานั้น, ≤ 0)"]                     # ขั้นบันได เทาจางมาก ประ
+    assert list(now_line.y) == [0, -60, -150, -100, -100] and list(now_line.x) == list(burn.x)
+    assert now_line.line.shape == "hv" and now_line.line.dash == "dash" and now_line.fill is None
+    assert now_line.line.width <= 1 and now_line.line.color == "rgba(82,81,78,0.5)"   # text_secondary ของ light · จาง
     projected = next(t for t in fig.data if t.name.endswith("· คาด"))
     assert projected.line.dash == "dash" and projected.y[-1] == pytest.approx(190.0)
     texts = [a.text for a in fig.layout.annotations]
@@ -512,7 +514,7 @@ def test_cash_equations_show_the_real_numbers():
     assert "t0 2026-11-10 15:00 UTC (fill แรก)" in text
     assert "Ē = +20.00 / 7.00 วัน = +2.86 USD/วัน" in text
     assert "cash_burn -150.00" in text
-    assert "cash_burn_now = min(0, Σ Aₙ(now))" in text
+    assert "cash_burn_now(t) = min(0, Σ Aₙ(t))" in text
     assert any(line.strip().startswith("รวม") and "· cash_burn_now " in line for line in text.splitlines())
 
 
