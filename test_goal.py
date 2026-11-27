@@ -444,10 +444,9 @@ def test_the_cash_figure_has_four_lines_without_the_en_line():
     assert np.allclose(named["ต้นทุน option (ev ไม่คิด intrinsic)"].y, 190.0)       # แนวนอนฝั่งบวก
     burn = named["Cash Burn สะสม (Aₙ ต่ำสุด, ≤ 0)"]
     assert max(burn.y) <= 0 and list(burn.y) == [0, -60, -150, -150, -150] and burn.line.shape == "hv"
-    now_line = named["Cash Burn ตอนนี้ (Aₙ ณ เวลานั้น, ≤ 0)"]                     # ขั้นบันได เทาจางมาก ประ
-    assert list(now_line.y) == [0, -60, -150, -100, -100] and list(now_line.x) == list(burn.x)
-    assert now_line.line.shape == "hv" and now_line.line.dash == "dash" and now_line.fill is None
-    assert now_line.line.width <= 1 and now_line.line.color == "rgba(82,81,78,0.5)"   # text_secondary ของ light · จาง
+    dots = named["Cash Burn ตอนนี้ (Aₙ ณ เวลานั้น, ≤ 0)"]                         # จุดสีแดงล้วน ไม่มีเส้น
+    assert list(dots.y) == [0, -60, -150, -100, -100] and list(dots.x) == list(burn.x)
+    assert dots.mode == "markers" and dots.marker.color == "#d03b3b" and dots.fill is None
     projected = next(t for t in fig.data if t.name.endswith("· คาด"))
     assert projected.line.dash == "dash" and projected.y[-1] == pytest.approx(190.0)
     texts = [a.text for a in fig.layout.annotations]
